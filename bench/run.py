@@ -28,7 +28,14 @@ NPM = shutil.which("npm")
 
 
 def run(cmd, cwd=None):
-    subprocess.run(cmd, cwd=cwd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proc = subprocess.run(
+        cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"command failed ({proc.returncode}): {' '.join(map(str, cmd))}\n"
+            + proc.stderr.decode(errors="replace")[-4000:]
+        )
 
 
 def generate(content_dir: Path, count: int, profile: str = "code"):

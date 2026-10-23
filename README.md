@@ -37,12 +37,16 @@ marketing pages.
 - **Fast by default.** Cold builds are parallel from Markdown parsing to output
   writes: 1,000 plain posts build in 65 ms, and 10,000 posts with code blocks
   in about one second on the [benchmark machine](#benchmarks).
+- **Incremental by default.** A build remembers what it rendered, so a rebuild
+  only touches the pages whose source, templates or site context changed:
+  1,000 posts rebuild in ~27 ms, and editing one post costs ~40 ms.
 - **One static binary.** The release binary is 3.9 MB and has no runtime
   dependencies. No `node_modules`, no language runtime, no service to install.
 - **Small, understandable surface.** A focused feature set instead of a plugin
   ecosystem, a bundler, and a JavaScript toolchain.
-- **Batteries included.** Sections, tags, page bundles, drafts, RSS, sitemap,
-  search index, `404.html`, syntax highlighting, and a live-reloading dev server.
+- **Batteries included.** Sections, pagination, tags, page bundles, drafts,
+  aliases, RSS, sitemap, search index, `404.html`, a table of contents, syntax
+  highlighting, a link checker, and a live-reloading dev server.
 - **Comfortable authoring.** TOML or YAML frontmatter, optional templates, and
   a working site from `agno new` in seconds.
 
@@ -60,7 +64,7 @@ faster than Hugo** and **16.7–185× faster than Astro** on cold builds. See
   static at runtime.
 
 > [!NOTE]
-> agno is at **0.2.0** and is not on [crates.io](https://crates.io/crates/agno)
+> agno is at **0.3.0** and is not on [crates.io](https://crates.io/crates/agno)
 > yet. Prebuilt binaries are planned for GitHub Releases; today, install from
 > Git or build from source.
 
@@ -82,7 +86,7 @@ cargo install --path .
 
 ```sh
 agno --version
-# agno 0.2.0
+# agno 0.3.0
 ```
 
 ## Quick start
@@ -121,21 +125,36 @@ The generated site is in `dist/` and can be deployed to any static host.
 | Command | Description |
 | --- | --- |
 | `agno new <dir>` | Scaffold a new site with the default theme, content, and config |
-| `agno build` | Build the site into `dist/` |
-| `agno build --no-clean` | Rebuild without deleting `dist/`; stale generated files are still removed |
+| `agno build` | Build into `dist/`, reusing pages that did not change |
+| `agno build --clean` | Delete `dist/` and rebuild everything |
 | `agno build --drafts` | Include pages marked `draft = true` |
+| `agno build --minify` | Collapse HTML whitespace and strip comments |
 | `agno build --stats` | Print content, page, and feed timings |
 | `agno dev` | Build, serve on port 1111, and rebuild on file changes |
 | `agno dev --port 3000` | Use a different port |
 | `agno dev --drafts` | Include draft pages in the dev server |
+| `agno check` | Report broken internal links and missing templates |
 | `agno clean` | Remove `dist/` and the local cache |
 
-`build`, `dev`, and `clean` accept `--root <dir>` to operate on another site
-directory. `new` accepts `--force` to write into a non-empty directory.
+`build`, `dev`, `check`, and `clean` accept `--root <dir>` to operate on another
+site directory. `new` accepts `--force` to write into a non-empty directory.
 
-`agno build --no-clean` keeps unchanged output files in place and uses the
-manifest in `.agno-cache/` to delete pages, feeds, or static files that no
-longer exist. It is the same mode `agno dev` uses between rebuilds.
+Builds are incremental. `agno build` keeps the existing `dist/` and only
+re-renders pages whose source, templates, or site-wide context changed, using
+the fingerprints in `.agno-cache/`. Files that no longer belong to any page are
+removed through the manifest. `--clean` throws all of that away; `agno clean`
+also drops the cache.
+
+`agno check` resolves every internal Markdown link and image against the files
+the build will produce, and fails with exit code 1 when something is missing.
+It also reports pages whose `template` does not exist and pages without a date.
+
+```sh
+$ agno check
+error: ./content/blog/hello.md:12: broken link /blog/nope/ (resolves to /blog/nope/index.html)
+
+1 error(s) across 42 pages (318 internal links checked)
+```
 
 ## Content
 
@@ -153,6 +172,7 @@ draft = false
 template = "post.html"   # optional override
 slug = "hello-agno"      # optional
 url = "/hello/"          # optional
+aliases = ["/old-hello/", "/2019/hello/"]
 +++
 
 Body in **Markdown**.
@@ -169,9 +189,23 @@ Body in **Markdown**.
 | `template` | Template name for this page |
 | `slug` | Override the generated slug |
 | `url` | Override the generated URL |
+| `aliases` | Extra URLs that redirect to this page with a meta refresh |
 
 Any other frontmatter field is available to templates as
 `page.extra.<name>`.
+
+Section indexes (`content/blog/_index.md`) additionally accept `paginate_by`,
+which splits the section listing into pages of that many cards:
+
+```toml
++++
+title = "Blog"
+paginate_by = 10
++++
+```
+
+Page 1 stays at `/blog/`; the rest live at `/blog/page/2/`, `/blog/page/3/`,
+and so on, and are linked through `page.paginator` in `section.html`.
 
 A directory under `content/` becomes a section. A file named `index.md` turns
 its directory into a page bundle:
@@ -195,7 +229,13 @@ back to them, so a site still builds without a `templates/` directory.
 | `site.title`, `site.description`, `site.base_url`, `site.language`, `site.author`, `site.menu`, `site.year`, `site.post_count` | Site metadata |
 | `site.tags[].name`, `.url`, `.count`, `.latest_title`, `.latest_url` | Tags with post counts and the newest tagged post |
 | `page.title`, `page.url`, `page.date`, `page.date_display`, `page.datetime`, `page.reading_minutes`, `page.description`, `page.content`, `page.tags`, `page.categories`, `page.slug`, `page.section`, `page.extra` | Current page or list page |
+| `page.words`, `page.toc`, `page.toc_html` | Word count, heading tree (`level`, `id`, `title`, `children`), and the same tree rendered as nested `<ul>` |
+| `page.paginator` | Pagination state on section pages: `current`, `total`, `page_size`, `item_count`, `prev_url`, `next_url`, `first_url`, `last_url`, `links[]` |
 | `pages[].title`, `.url`, `.date`, `.date_display`, `.datetime`, `.reading_minutes`, `.summary`, `.tags`, `.section` | Page cards in list templates |
+
+`page.toc` is empty when a page has fewer than two headings. Every heading gets
+a slugified `id`, so `#some-heading` links work out of the box; duplicate
+headings are disambiguated with a numeric suffix.
 
 The default templates are `base.html`, `page.html`, `section.html`,
 `index.html`, and `404.html`. Add `tag.html` to use a dedicated tag layout.
@@ -274,7 +314,7 @@ pages/s for Hugo. The full matrix, raw samples, and reproduction steps are in
 [`bench/REPORT.md`](bench/REPORT.md) and [`bench/README.md`](bench/README.md).
 
 > **Report versions:** agno 0.1.0, Hugo 0.168.0, Astro 7.4.2. The current
-> release is 0.2.0; rerun [`bench/suite.py`](bench/suite.py) to measure your own
+> release is 0.3.0; rerun [`bench/suite.py`](bench/suite.py) to measure your own
 > machine.
 
 ### Search index cost (agno 0.2.0)
@@ -292,13 +332,29 @@ the index from content loading and page rendering. Whole-build wall-clock
 deltas were within run-to-run noise. Raw samples and method:
 [`bench/SEARCH_INDEX.md`](bench/SEARCH_INDEX.md).
 
-### No-clean rebuild (agno 0.2.0)
+### Incremental rebuilds (agno 0.3.0)
 
-On the same 10,000-post `code` corpus, `agno build` (clean) took about **1.2 s**
-and `agno build --no-clean` took about **0.82 s** (median of 5 alternating runs
-on the host above). The no-clean path still renders every page; it skips
-deleting the output tree and uses `.agno-cache/outputs.json` to remove only
-stale files.
+Every build writes a fingerprint per page into `.agno-cache/fingerprints.bin`.
+A rebuild re-renders a page only when its source, the templates, or the
+site-wide context changed, so a no-op rebuild is mostly a directory walk and a
+manifest diff.
+
+| Posts | Cold (`--clean`) | No-op rebuild | One post edited |
+| ---: | ---: | ---: | ---: |
+| 1,000 | 204 ms | **27 ms** | **40 ms** |
+| 10,000 | 1,607 ms | **225 ms** | **227 ms** |
+
+At 10,000 posts a rebuild costs about **1/7** of a cold build. The numbers are
+the fastest of 7 (1,000 posts) and 5 (10,000 posts) samples on a host with a
+load average around 7, so medians run higher; reproduce them with:
+
+```sh
+python3 bench/incremental.py --count 10000 --runs 5
+```
+
+The old `agno build --no-clean` path, which re-rendered every page but skipped
+deleting the output tree, is gone: incremental builds are now the default and
+`--clean` is the opt-in full rebuild.
 
 > **Fairness note:** the Astro fixture renders Markdown pages only and does not
 > include syntax highlighting, taxonomies, RSS, or a sitemap. Its timings are
@@ -322,11 +378,17 @@ flowchart LR
 - [`src/content.rs`](src/content.rs) discovers Markdown files, parses
   frontmatter, and derives URLs, dates, and sections.
 - [`src/markdown.rs`](src/markdown.rs) renders CommonMark/GFM with
-  `pulldown-cmark` and highlights fenced code with `syntect`.
+  `pulldown-cmark`, builds the table of contents, and highlights fenced code
+  with `syntect`.
 - [`src/render.rs`](src/render.rs) renders MiniJinja templates with the embedded
   theme as a fallback.
 - [`src/site.rs`](src/site.rs) runs the parallel build, writes pages and feeds,
   and cleans the output directory.
+- [`src/cache.rs`](src/cache.rs) stores per-page fingerprints so unchanged pages
+  can be skipped.
+- [`src/minify.rs`](src/minify.rs) is the conservative HTML minifier behind
+  `--minify`.
+- [`src/check.rs`](src/check.rs) resolves internal links for `agno check`.
 - [`src/serve.rs`](src/serve.rs) serves `dist/` with `tiny_http` and rebuilds on
   filesystem changes.
 - [`src/scaffold.rs`](src/scaffold.rs) creates a working starter site.
