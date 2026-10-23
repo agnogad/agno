@@ -31,13 +31,25 @@ pub struct Stats {
 }
 
 #[derive(Serialize)]
-struct SiteView {
+struct SiteView<'a> {
     title: String,
     description: String,
     base_url: String,
     language: String,
+    author: String,
     menu: Vec<MenuItem>,
     year: i32,
+    post_count: usize,
+    tags: Vec<TagView<'a>>,
+}
+
+#[derive(Serialize)]
+struct TagView<'a> {
+    name: &'a str,
+    url: &'a str,
+    count: usize,
+    latest_title: &'a str,
+    latest_url: &'a str,
 }
 
 #[derive(Serialize)]
@@ -45,7 +57,9 @@ struct PageView<'a> {
     title: &'a str,
     url: &'a str,
     date: &'a str,
+    date_display: &'a str,
     datetime: &'a str,
+    reading_minutes: u32,
     description: &'a str,
     content: &'a str,
     tags: &'a [String],
@@ -60,8 +74,22 @@ struct CardView<'a> {
     title: &'a str,
     url: &'a str,
     date: &'a str,
+    date_display: &'a str,
     datetime: &'a str,
+    reading_minutes: u32,
     summary: &'a str,
+    tags: &'a [String],
+    section: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct SearchEntry<'a> {
+    title: &'a str,
+    url: &'a str,
+    date: &'a str,
+    description: &'a str,
+    summary: &'a str,
+    tags: &'a [String],
 }
 
 #[derive(Serialize)]
@@ -82,7 +110,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let ms_load = phase.elapsed().as_millis();
 
     let templates = Templates::load(&cfg.templates())?;
-    let site = site_view(&cfg);
+    let site = site_view(&cfg, &content);
     let output = cfg.output();
     if opts.clean && output.exists() {
         remove_all(&output).with_context(|| format!("cleaning {}", output.display()))?;
@@ -160,6 +188,10 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
 
     write_text(&output, "rss.xml", &rss(&cfg, &content.pages))?;
     write_text(&output, "sitemap.xml", &sitemap(&cfg, &content))?;
+    if cfg.search_index {
+        let index = search_index(&content.pages)?;
+        write_text(&output, "search-index.json", &index)?;
+    }
     write_text(
         &output,
         "robots.txt",
@@ -184,7 +216,12 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     })
 }
 
-fn render_page(cfg: &Config, templates: &Templates, site: &SiteView, page: &Page) -> Result<()> {
+fn render_page(
+    cfg: &Config,
+    templates: &Templates,
+    site: &SiteView<'_>,
+    page: &Page,
+) -> Result<()> {
     let name = page
         .template
         .as_deref()
@@ -206,7 +243,7 @@ fn render_page(cfg: &Config, templates: &Templates, site: &SiteView, page: &Page
 fn render_list(
     cfg: &Config,
     templates: &Templates,
-    site: &SiteView,
+    site: &SiteView<'_>,
     list: &ListView<'_>,
     candidates: &[&str],
 ) -> Result<()> {
@@ -248,14 +285,45 @@ fn write_text(output: &Path, name: &str, body: &str) -> Result<()> {
     fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
-fn site_view(cfg: &Config) -> SiteView {
+fn site_view<'a>(cfg: &Config, content: &'a Content) -> SiteView<'a> {
+    let post_count = content
+        .pages
+        .iter()
+        .filter(|page| page.date.is_some())
+        .count();
+    let tags = content
+        .tags
+        .iter()
+        .map(|tag| {
+            let mut count = 0;
+            let mut latest = None;
+            for page in &content.pages {
+                if page.tags.iter().any(|name| name == &tag.key) {
+                    count += 1;
+                    if latest.is_none() {
+                        latest = Some(page);
+                    }
+                }
+            }
+            TagView {
+                name: &tag.title,
+                url: &tag.url,
+                count,
+                latest_title: latest.map(|page| page.title.as_str()).unwrap_or_default(),
+                latest_url: latest.map(|page| page.url.as_str()).unwrap_or_default(),
+            }
+        })
+        .collect();
     SiteView {
         title: cfg.title.clone(),
         description: cfg.description.clone(),
         base_url: cfg.base_url.clone(),
         language: cfg.language.clone(),
+        author: cfg.author.clone(),
         menu: cfg.menu.clone(),
         year: OffsetDateTime::now_utc().year(),
+        post_count,
+        tags,
     }
 }
 
@@ -264,7 +332,9 @@ fn page_view(page: &Page) -> PageView<'_> {
         title: &page.title,
         url: &page.url,
         date: &page.date_text,
+        date_display: &page.date_display,
         datetime: &page.datetime,
+        reading_minutes: page.reading_minutes,
         description: page.plain_description(),
         content: &page.html,
         tags: &page.tags,
@@ -280,14 +350,22 @@ fn card(page: &Page) -> CardView<'_> {
         title: &page.title,
         url: &page.url,
         date: &page.date_text,
+        date_display: &page.date_display,
         datetime: &page.datetime,
+        reading_minutes: page.reading_minutes,
         summary: page.plain_description(),
+        tags: &page.tags,
+        section: page.section.as_deref(),
     }
 }
 
 fn rss(cfg: &Config, pages: &[Page]) -> String {
     let mut items = String::new();
-    for page in pages.iter().take(cfg.rss_items) {
+    for page in pages
+        .iter()
+        .filter(|page| page.date.is_some())
+        .take(cfg.rss_items)
+    {
         let link = cfg.absolute(&page.url);
         let pub_date = page.rss_date();
         items.push_str(&format!(
@@ -310,6 +388,22 @@ fn rss(cfg: &Config, pages: &[Page]) -> String {
         escape_html(&cfg.description),
         escape_html(&cfg.language),
     )
+}
+
+fn search_index(pages: &[Page]) -> Result<String> {
+    let entries: Vec<SearchEntry<'_>> = pages
+        .iter()
+        .filter(|page| page.date.is_some())
+        .map(|page| SearchEntry {
+            title: &page.title,
+            url: &page.url,
+            date: &page.datetime,
+            description: page.plain_description(),
+            summary: &page.summary,
+            tags: &page.tags,
+        })
+        .collect();
+    serde_json::to_string(&entries).context("serializing search-index.json")
 }
 
 fn sitemap(cfg: &Config, content: &Content) -> String {

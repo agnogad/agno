@@ -20,7 +20,7 @@ marketing pages.
 - **Small, understandable surface.** A focused feature set instead of a plugin
   ecosystem, a bundler, and a JavaScript toolchain.
 - **Batteries included.** Sections, tags, page bundles, drafts, RSS, sitemap,
-  `404.html`, syntax highlighting, and a live-reloading dev server.
+  search index, `404.html`, syntax highlighting, and a live-reloading dev server.
 - **Comfortable authoring.** TOML or YAML frontmatter, optional templates, and
   a working site from `agno new` in seconds.
 
@@ -194,18 +194,19 @@ Any other frontmatter field is available to templates as
 ## Templates
 
 Templates use [MiniJinja](https://docs.rs/minijinja) and live in `templates/`.
-Missing templates fall back to the embedded defaults, so a site builds without
-a `templates/` directory.
+Files in `templates/` override the embedded defaults; missing templates fall
+back to them, so a site still builds without a `templates/` directory.
 
 | Variable | Contents |
 | --- | --- |
-| `site.title`, `site.description`, `site.base_url`, `site.language`, `site.menu`, `site.year` | Site metadata |
-| `page.title`, `page.url`, `page.date`, `page.datetime`, `page.description`, `page.content`, `page.tags`, `page.categories`, `page.slug`, `page.section`, `page.extra` | Current page or list page |
-| `pages[].title`, `.url`, `.date`, `.datetime`, `.summary` | Page cards in list templates |
+| `site.title`, `site.description`, `site.base_url`, `site.language`, `site.author`, `site.menu`, `site.year`, `site.post_count` | Site metadata |
+| `site.tags[].name`, `.url`, `.count`, `.latest_title`, `.latest_url` | Tags with post counts and the newest tagged post |
+| `page.title`, `page.url`, `page.date`, `page.date_display`, `page.datetime`, `page.reading_minutes`, `page.description`, `page.content`, `page.tags`, `page.categories`, `page.slug`, `page.section`, `page.extra` | Current page or list page |
+| `pages[].title`, `.url`, `.date`, `.date_display`, `.datetime`, `.reading_minutes`, `.summary`, `.tags`, `.section` | Page cards in list templates |
 
 The default templates are `base.html`, `page.html`, `section.html`,
 `index.html`, and `404.html`. Add `tag.html` to use a dedicated tag layout.
-Filters include `slugify`, `safe`, and the MiniJinja built-ins.
+Filters include `slugify`, `starts_with`, `safe`, and the MiniJinja built-ins.
 
 ```html
 {% extends "base.html" %}
@@ -224,6 +225,7 @@ title = "My Site"
 description = ""
 base_url = "https://example.com"
 language = "en"
+author = "Your Name"
 
 content_dir = "content"
 templates_dir = "templates"
@@ -232,6 +234,7 @@ output_dir = "dist"
 
 highlight = true
 rss_items = 20
+search_index = false
 
 [[menu]]
 title = "Blog"
@@ -241,6 +244,9 @@ url = "/blog/"
 title = "About"
 url = "/about/"
 ```
+
+Set `search_index = true` to emit `search-index.json` for client-side search.
+`page.date_display` follows `language` for Turkish and English month names.
 
 ## Architecture
 

@@ -19,7 +19,9 @@ pub struct Page {
     pub date: Option<OffsetDateTime>,
     pub updated: Option<OffsetDateTime>,
     pub date_text: String,
+    pub date_display: String,
     pub datetime: String,
+    pub reading_minutes: u32,
     pub draft: bool,
     pub description: String,
     pub summary: String,
@@ -109,7 +111,7 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
 
     let loaded: Result<Vec<Option<Page>>> = page_paths
         .par_iter()
-        .map(|path| load_page(&root, path, include_drafts, cfg.highlight))
+        .map(|path| load_page(&root, path, include_drafts, cfg.highlight, &cfg.language))
         .collect();
     let mut pages: Vec<Page> = loaded?.into_iter().flatten().collect();
     pages.sort_by(|a, b| {
@@ -200,6 +202,7 @@ fn load_page(
     path: &Path,
     include_drafts: bool,
     highlight: bool,
+    language: &str,
 ) -> Result<Option<Page>> {
     let src =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -243,6 +246,15 @@ fn load_page(
     let datetime = date
         .and_then(|d| d.format(&Rfc3339).ok())
         .unwrap_or_default();
+    let date_display = date
+        .map(|d| format_date_display(d, language))
+        .unwrap_or_default();
+    let word_count = body.split_whitespace().count();
+    let reading_minutes = if word_count == 0 {
+        0
+    } else {
+        word_count.div_ceil(200) as u32
+    };
 
     let default_slug = if is_bundle_index {
         parent
@@ -288,7 +300,9 @@ fn load_page(
         date,
         updated,
         date_text,
+        date_display,
         datetime,
+        reading_minutes,
         draft,
         description,
         summary,
@@ -310,7 +324,9 @@ fn empty_page(title: String, url: String) -> Page {
         date: None,
         updated: None,
         date_text: String::new(),
+        date_display: String::new(),
         datetime: String::new(),
+        reading_minutes: 0,
         draft: false,
         description: String::new(),
         summary: String::new(),
@@ -418,6 +434,42 @@ fn field_string_list(fm: &Value, key: &str) -> Vec<String> {
         Some(Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
     }
+}
+
+pub fn format_date_display(date: OffsetDateTime, language: &str) -> String {
+    let month = date.month() as u8;
+    if language.to_ascii_lowercase().starts_with("tr") {
+        let names = [
+            "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül",
+            "Ekim", "Kasım", "Aralık",
+        ];
+        return format!(
+            "{} {} {}",
+            date.day(),
+            names[(month - 1) as usize],
+            date.year()
+        );
+    }
+    let names = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    format!(
+        "{} {}, {}",
+        names[(month - 1) as usize],
+        date.day(),
+        date.year()
+    )
 }
 
 pub fn parse_date(input: &str) -> Option<OffsetDateTime> {
@@ -542,6 +594,13 @@ mod tests {
     fn slugify_handles_turkish() {
         assert_eq!(slugify("Çığır Açan Şeyler"), "cigir-acan-seyler");
         assert_eq!(slugify("  Hello, World!  "), "hello-world");
+    }
+
+    #[test]
+    fn formats_display_dates_in_english_and_turkish() {
+        let date = parse_date("2026-07-02T14:46:49+04:00").unwrap();
+        assert_eq!(format_date_display(date, "en"), "July 2, 2026");
+        assert_eq!(format_date_display(date, "tr"), "2 Temmuz 2026");
     }
 
     #[test]

@@ -13,9 +13,14 @@ impl Templates {
         let mut env = Environment::new();
         env.set_auto_escape_callback(|_| AutoEscape::Html);
         env.add_filter("slugify", |value: String| slugify(&value));
+        env.add_filter("starts_with", |value: String, prefix: String| {
+            value.starts_with(&prefix)
+        });
         for (name, source) in theme::TEMPLATES {
-            env.add_template_owned(*name, *source)
-                .with_context(|| format!("loading embedded template {name}"))?;
+            if !dir.join(name).is_file() {
+                env.add_template_owned(*name, *source)
+                    .with_context(|| format!("loading embedded template {name}"))?;
+            }
         }
         if dir.is_dir() {
             env.set_loader(path_loader(dir));

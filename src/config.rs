@@ -9,6 +9,7 @@ pub struct Config {
     pub description: String,
     pub base_url: String,
     pub language: String,
+    pub author: String,
     pub menu: Vec<MenuItem>,
     pub content_dir: PathBuf,
     pub templates_dir: PathBuf,
@@ -16,6 +17,7 @@ pub struct Config {
     pub output_dir: PathBuf,
     pub highlight: bool,
     pub rss_items: usize,
+    pub search_index: bool,
     #[serde(skip)]
     pub root: PathBuf,
 }
@@ -33,6 +35,7 @@ impl Default for Config {
             description: String::new(),
             base_url: "http://localhost:1111".into(),
             language: "en".into(),
+            author: String::new(),
             menu: Vec::new(),
             content_dir: "content".into(),
             templates_dir: "templates".into(),
@@ -40,6 +43,7 @@ impl Default for Config {
             output_dir: "dist".into(),
             highlight: true,
             rss_items: 20,
+            search_index: false,
             root: PathBuf::new(),
         }
     }

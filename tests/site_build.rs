@@ -8,7 +8,7 @@ fn fixture(name: &str) -> PathBuf {
     fs::create_dir_all(root.join("content/blog")).unwrap();
     fs::write(
         root.join("agno.toml"),
-        "title = \"Test Site\"\nbase_url = \"https://example.com\"\n",
+        "title = \"Test Site\"\nbase_url = \"https://example.com\"\nauthor = \"Tester\"\nsearch_index = true\n",
     )
     .unwrap();
     fs::write(
@@ -66,12 +66,40 @@ fn builds_pages_lists_feeds_and_taxonomies() {
     let rss = text(&root.join("dist/rss.xml"));
     assert!(rss.contains("<link>https://example.com/blog/hello/</link>"));
     assert!(!rss.contains("Draft"));
+    assert!(!rss.contains("About body"));
 
     let sitemap = text(&root.join("dist/sitemap.xml"));
     assert!(sitemap.contains("https://example.com/about/"));
 
+    let index = text(&root.join("dist/search-index.json"));
+    assert!(index.contains("\"title\":\"Hello\""));
+    assert!(!index.contains("\"title\":\"About\""));
+
     assert!(root.join("dist/style.css").exists());
     assert!(!root.join("dist/blog/draft/index.html").exists());
+}
+
+#[test]
+fn user_templates_override_embedded_defaults() {
+    let root = fixture("override");
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/index.html"),
+        "custom {{ page.title }} {{ pages|length }}",
+    )
+    .unwrap();
+
+    build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+        },
+    )
+    .unwrap();
+
+    let home = text(&root.join("dist/index.html"));
+    assert!(home.starts_with("custom Home 2"));
 }
 
 #[test]
