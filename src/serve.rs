@@ -15,6 +15,7 @@ pub fn dev(root: PathBuf, port: u16, drafts: bool) -> Result<()> {
     let opts = BuildOptions {
         drafts,
         clean: true,
+        minify: false,
     };
     let stats = site::build(&root, &opts)?;
     println!(
@@ -79,6 +80,7 @@ pub fn dev(root: PathBuf, port: u16, drafts: bool) -> Result<()> {
             &BuildOptions {
                 drafts,
                 clean: false,
+                minify: false,
             },
         ) {
             Ok(_) => {

@@ -3,6 +3,7 @@ pub mod check;
 pub mod config;
 pub mod content;
 pub mod markdown;
+pub mod minify;
 pub mod render;
 pub mod scaffold;
 pub mod serve;

@@ -18,6 +18,8 @@ pub struct Config {
     pub highlight: bool,
     pub rss_items: usize,
     pub search_index: bool,
+    /// Collapse HTML whitespace and strip comments on write.
+    pub minify: bool,
     #[serde(skip)]
     pub root: PathBuf,
 }
@@ -44,6 +46,7 @@ impl Default for Config {
             highlight: true,
             rss_items: 20,
             search_index: false,
+            minify: false,
             root: PathBuf::new(),
         }
     }

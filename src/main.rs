@@ -37,6 +37,9 @@ enum Command {
         /// Delete the output directory before building
         #[arg(long)]
         clean: bool,
+        /// Minify the HTML output
+        #[arg(long)]
+        minify: bool,
         /// Deprecated: builds are incremental by default
         #[arg(long, hide = true)]
         no_clean: bool,
@@ -86,11 +89,19 @@ fn main() -> Result<()> {
             drafts,
             stats,
             clean,
+            minify,
             no_clean: _,
             root,
         } => {
             let root = root.unwrap_or_else(|| PathBuf::from("."));
-            let report = site::build(&root, &BuildOptions { drafts, clean })?;
+            let report = site::build(
+                &root,
+                &BuildOptions {
+                    drafts,
+                    clean,
+                    minify,
+                },
+            )?;
             if stats {
                 println!(
                     "  content {} ms · pages {} ms · lists+feeds {} ms",

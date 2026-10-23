@@ -22,6 +22,8 @@ use walkdir::WalkDir;
 pub struct BuildOptions {
     pub drafts: bool,
     pub clean: bool,
+    /// Minify HTML output (the config file can also turn this on).
+    pub minify: bool,
 }
 
 #[derive(Debug)]
@@ -178,7 +180,10 @@ struct Manifest {
 
 pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let started = Instant::now();
-    let cfg = Config::load(root)?;
+    let mut cfg = Config::load(root)?;
+    if opts.minify {
+        cfg.minify = true;
+    }
     cfg.validate()?;
 
     let phase = Instant::now();
@@ -571,7 +576,12 @@ fn write_output(cfg: &Config, url: &str, html: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
-    fs::write(&path, html).with_context(|| format!("writing {}", path.display()))
+    let body = if cfg.minify {
+        crate::minify::minify_html(html)
+    } else {
+        html.to_string()
+    };
+    fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
 thread_local! {
@@ -673,6 +683,7 @@ fn header_hash(cfg: &Config, site: &SiteView<'_>) -> Result<u64> {
     Ok(cache::combine(&[
         cache::fingerprint(0, env!("CARGO_PKG_VERSION").as_bytes()),
         cache::fingerprint(0, if cfg.highlight { b"on" } else { b"off" }),
+        cache::fingerprint(0, if cfg.minify { b"min" } else { b"raw" }),
         cache::fingerprint(0, cfg.language.as_bytes()),
         cache::fingerprint(0, site_json.as_bytes()),
         templates_fingerprint(&cfg.templates()),

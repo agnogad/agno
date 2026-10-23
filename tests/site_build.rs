@@ -46,6 +46,7 @@ fn builds_pages_lists_feeds_and_taxonomies() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap();
@@ -94,6 +95,7 @@ fn user_templates_override_embedded_defaults() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap();
@@ -110,6 +112,7 @@ fn drafts_flag_includes_drafts() {
         &BuildOptions {
             drafts: true,
             clean: true,
+            minify: false,
         },
     )
     .unwrap();
@@ -132,6 +135,7 @@ fn yaml_frontmatter_and_page_bundles_work() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap();
@@ -147,6 +151,7 @@ fn clean_build(root: &Path) -> agno::site::Stats {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap()
@@ -188,6 +193,7 @@ fn duplicate_output_urls_are_rejected() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap_err()
@@ -214,6 +220,7 @@ fn file_and_directory_output_conflicts_are_rejected() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap_err()
@@ -313,6 +320,7 @@ fn incremental_build_removes_stale_generated_and_static_files() {
         &BuildOptions {
             drafts: false,
             clean: false,
+            minify: false,
         },
     )
     .unwrap();
@@ -336,6 +344,7 @@ fn removing_a_static_stylesheet_restores_the_default() {
         &BuildOptions {
             drafts: false,
             clean: false,
+            minify: false,
         },
     )
     .unwrap();
@@ -365,6 +374,7 @@ fn incremental_build_handles_a_file_to_directory_url_change() {
         &BuildOptions {
             drafts: false,
             clean: false,
+            minify: false,
         },
     )
     .unwrap();
@@ -389,6 +399,7 @@ fn output_dir_must_not_escape_or_overlap_inputs() {
             &BuildOptions {
                 drafts: false,
                 clean: true,
+                minify: false,
             },
         )
         .unwrap_err()
@@ -415,6 +426,7 @@ fn a_missing_page_template_is_an_error() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap_err()
@@ -428,6 +440,7 @@ fn build_incremental(root: &Path) -> agno::site::Stats {
         &BuildOptions {
             drafts: false,
             clean: false,
+            minify: false,
         },
     )
     .unwrap()
@@ -521,6 +534,7 @@ fn headings_get_anchors_and_a_table_of_contents() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap();
@@ -556,6 +570,7 @@ fn sections_can_paginate_their_pages() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap();
@@ -592,6 +607,7 @@ fn aliases_emit_redirect_pages() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap();
@@ -623,6 +639,7 @@ fn an_alias_that_collides_with_a_page_is_rejected() {
         &BuildOptions {
             drafts: false,
             clean: true,
+            minify: false,
         },
     )
     .unwrap_err()
@@ -682,4 +699,24 @@ fn check_flags_a_missing_page_template() {
         "{:?}",
         report.errors
     );
+}
+
+#[test]
+fn minify_collapses_template_whitespace_but_not_code() {
+    let root = fixture("minify");
+    build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: true,
+        },
+    )
+    .unwrap();
+
+    let post = text(&root.join("dist/blog/hello/index.html"));
+    assert!(post.starts_with("<!doctype html><html"), "{post}");
+    assert!(!post.contains("    <meta"), "indentation survived");
+    assert!(post.contains("<pre class=\"code\">"), "code block missing");
+    assert!(post.contains("main</span>"), "code block lost its content");
 }
