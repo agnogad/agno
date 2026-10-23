@@ -275,8 +275,8 @@ The search index is optional and off by default. On the same corpus, toggling
 
 | Posts | `lists+feeds` off | on | Delta | Output off | on | `search-index.json` |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 7.0 ms | 9.0 ms | **+2.0 ms** | 3.50 MB | 3.87 MB | 0.37 MB |
-| 10,000 | 74.0 ms | 87.0 ms | **+13.0 ms** | 34.90 MB | 38.61 MB | 3.71 MB |
+| 1,000 | 9.0 ms | 9.0 ms | **+0.0 ms** | 3.50 MB | 3.87 MB | 0.37 MB |
+| 10,000 | 84.0 ms | 110.0 ms | **+26.0 ms** | 34.90 MB | 38.61 MB | 3.71 MB |
 
 `lists+feeds` is the build phase that writes the index, so its delta isolates
 the index from content loading and page rendering. Whole-build wall-clock

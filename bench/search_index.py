@@ -99,31 +99,35 @@ def measure_count(site: Path, count: int, profile: str, runs: int) -> list[dict]
     dist = base.dist("agno", site)
     output = {}
 
-    # Warm both settings once; keep the generated output for size comparisons.
-    for enabled in (False, True):
-        set_search_index(site, enabled)
-        shutil.rmtree(dist, ignore_errors=True)
-        build_once(site)
-        total, index = output_stats(dist)
-        if enabled != bool(index):
-            raise RuntimeError(
-                f"search_index={enabled} but search-index.json is {index} bytes"
-            )
-        output[enabled] = {
-            "output_mb": round(total / 1_000_000, 2),
-            "index_mb": round(index / 1_000_000, 2),
-            "index_bytes": index,
-        }
-
-    wall = {False: [], True: []}
-    rest = {False: [], True: []}
-    for _ in range(runs):
+    try:
+        # Warm both settings once; keep the generated output for size comparisons.
         for enabled in (False, True):
             set_search_index(site, enabled)
             shutil.rmtree(dist, ignore_errors=True)
-            elapsed, rest_ms = build_once(site)
-            wall[enabled].append(elapsed)
-            rest[enabled].append(rest_ms)
+            build_once(site)
+            total, index = output_stats(dist)
+            if enabled != bool(index):
+                raise RuntimeError(
+                    f"search_index={enabled} but search-index.json is {index} bytes"
+                )
+            output[enabled] = {
+                "output_mb": round(total / 1_000_000, 2),
+                "index_mb": round(index / 1_000_000, 2),
+                "index_bytes": index,
+            }
+
+        wall = {False: [], True: []}
+        rest = {False: [], True: []}
+        for _ in range(runs):
+            for enabled in (False, True):
+                set_search_index(site, enabled)
+                shutil.rmtree(dist, ignore_errors=True)
+                elapsed, rest_ms = build_once(site)
+                wall[enabled].append(elapsed)
+                rest[enabled].append(rest_ms)
+    finally:
+        # Leave the shared bench site on the default setting for suite.py.
+        set_search_index(site, False)
 
     records = []
     for enabled in (False, True):
