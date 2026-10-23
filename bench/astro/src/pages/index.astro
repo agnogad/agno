@@ -1,0 +1,20 @@
+---
+import { getCollection } from 'astro:content';
+import Base from '../layouts/Base.astro';
+
+const posts = (await getCollection('blog')).sort(
+  (a, b) => (b.data.date?.getTime() ?? 0) - (a.data.date?.getTime() ?? 0),
+);
+---
+
+<Base title="Bench">
+  <ul class="post-list">
+    {posts.map((post) => (
+      <li>
+        <a href={`/${post.id}/`}>{post.data.title}</a>
+        {post.data.date && <time datetime={post.data.date.toISOString()}>{post.data.date.toISOString().slice(0, 10)}</time>}
+        {post.data.description && <p>{post.data.description}</p>}
+      </li>
+    ))}
+  </ul>
+</Base>

@@ -1,0 +1,11 @@
+{
+  "name": "agno-bench-astro",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "astro build"
+  },
+  "dependencies": {
+    "astro": "latest"
+  }
+}

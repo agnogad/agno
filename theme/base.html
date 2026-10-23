@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="{{ site.language }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ page.title }}{% if page.title != site.title %} · {{ site.title }}{% endif %}{% endblock %}</title>
+  {% if page.description %}<meta name="description" content="{{ page.description }}">{% endif %}
+  <link rel="stylesheet" href="/style.css">
+  <link rel="alternate" type="application/rss+xml" title="{{ site.title }}" href="/rss.xml">
+  <link rel="canonical" href="{{ site.base_url }}{{ page.url }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/">{{ site.title }}</a>
+    <nav>
+      {% for item in site.menu %}<a href="{{ item.url }}">{{ item.title }}</a>{% endfor %}
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>© {{ site.year }} {{ site.title }} · <a href="/rss.xml">RSS</a></footer>
+</body>
+</html>

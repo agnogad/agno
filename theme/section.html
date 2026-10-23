@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ page.title }}</h1>
+{% if page.description %}<p class="meta">{{ page.description }}</p>{% endif %}
+<div class="content">{{ page.content|safe }}</div>
+<ul class="post-list">
+  {% for item in pages %}
+  <li>
+    <a href="{{ item.url }}">{{ item.title }}</a>
+    {% if item.date %}<time datetime="{{ item.datetime }}">{{ item.date }}</time>{% endif %}
+    {% if item.summary %}<p>{{ item.summary }}</p>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

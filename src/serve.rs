@@ -1,0 +1,215 @@
+use crate::config::Config;
+use crate::site::{self, BuildOptions};
+use anyhow::{Context, Result};
+use notify::{RecursiveMode, Watcher};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
+use tiny_http::{Header, Request, Response, Server};
+
+const LIVE_SCRIPT: &str = r#"<script>(()=>{let v=null;setInterval(async()=>{try{const t=await (await fetch('/__agno/live',{cache:'no-store'})).text();if(v===null)v=t;else if(v!==t)location.reload()}catch(e){}},400)})();</script>"#;
+
+pub fn dev(root: PathBuf, port: u16, drafts: bool) -> Result<()> {
+    let opts = BuildOptions {
+        drafts,
+        clean: true,
+    };
+    let stats = site::build(&root, &opts)?;
+    println!(
+        "agno dev → http://localhost:{port}  ({} pages, {} ms)",
+        stats.pages, stats.ms_total
+    );
+
+    let cfg = Config::load(&root)?;
+    let dist = cfg.output();
+    let server = Arc::new(
+        Server::http(("127.0.0.1", port))
+            .map_err(|err| anyhow::anyhow!("starting server: {err}"))?,
+    );
+    let version = Arc::new(AtomicU64::new(0));
+
+    for _ in 0..4 {
+        let server = server.clone();
+        let dist = dist.clone();
+        let version = version.clone();
+        std::thread::spawn(move || serve_loop(server, dist, version));
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = &event {
+            let interesting =
+                event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove();
+            if !interesting {
+                return;
+            }
+        }
+        let _ = tx.send(event);
+    })
+    .context("creating file watcher")?;
+
+    for dir in [cfg.content(), cfg.templates(), cfg.static_dir()] {
+        if dir.is_dir() {
+            watcher
+                .watch(&dir, RecursiveMode::Recursive)
+                .with_context(|| format!("watching {}", dir.display()))?;
+        }
+    }
+    let config_file = root.join("agno.toml");
+    if config_file.is_file() {
+        watcher.watch(&config_file, RecursiveMode::NonRecursive)?;
+    }
+
+    loop {
+        match rx.recv() {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                eprintln!("watch error: {err}");
+                continue;
+            }
+            Err(_) => break,
+        }
+        while rx.recv_timeout(Duration::from_millis(120)).is_ok() {}
+
+        let started = std::time::Instant::now();
+        match site::build(
+            &root,
+            &BuildOptions {
+                drafts,
+                clean: false,
+            },
+        ) {
+            Ok(_) => {
+                version.fetch_add(1, Ordering::SeqCst);
+                println!("rebuilt in {} ms", started.elapsed().as_millis());
+            }
+            Err(err) => eprintln!("build failed: {err:#}"),
+        }
+    }
+    Ok(())
+}
+
+fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
+    while let Ok(request) = server.recv() {
+        let url = request.url().to_string();
+        let path = url.split(['?', '#']).next().unwrap_or("/");
+
+        if path == "/__agno/live" {
+            respond(
+                request,
+                200,
+                "text/plain; charset=utf-8",
+                version.load(Ordering::SeqCst).to_string(),
+            );
+            continue;
+        }
+
+        match resolve(&dist, path) {
+            Some(file) if file.extension().is_some_and(|e| e == "html") => {
+                match std::fs::read_to_string(&file) {
+                    Ok(html) => respond(request, 200, "text/html; charset=utf-8", inject(&html)),
+                    Err(_) => respond(
+                        request,
+                        500,
+                        "text/plain; charset=utf-8",
+                        "read error".into(),
+                    ),
+                }
+            }
+            Some(file) => match std::fs::read(&file) {
+                Ok(bytes) => {
+                    let ctype = content_type(&file);
+                    let response = Response::from_data(bytes)
+                        .with_status_code(200)
+                        .with_header(header("Content-Type", ctype))
+                        .with_header(header("Cache-Control", "no-store"));
+                    let _ = request.respond(response);
+                }
+                Err(_) => respond(
+                    request,
+                    500,
+                    "text/plain; charset=utf-8",
+                    "read error".into(),
+                ),
+            },
+            None => {
+                let not_found = dist.join("404.html");
+                let body = std::fs::read_to_string(&not_found)
+                    .map(|html| inject(&html))
+                    .unwrap_or_else(|_| "<h1>404</h1>".to_string());
+                respond(request, 404, "text/html; charset=utf-8", body);
+            }
+        }
+    }
+}
+
+fn resolve(dist: &Path, url_path: &str) -> Option<PathBuf> {
+    if url_path.contains("..") || url_path.contains('\\') {
+        return None;
+    }
+    let rel = url_path.trim_start_matches('/');
+    let base = dist.join(rel);
+    if base.is_dir() {
+        let index = base.join("index.html");
+        return index.is_file().then_some(index);
+    }
+    if base.is_file() {
+        return Some(base);
+    }
+    if !rel.rsplit('/').next().unwrap_or("").contains('.') {
+        let index = base.join("index.html");
+        return index.is_file().then_some(index);
+    }
+    None
+}
+
+fn inject(html: &str) -> String {
+    match html.rfind("</body>") {
+        Some(index) => format!("{}{}{}", &html[..index], LIVE_SCRIPT, &html[index..]),
+        None => format!("{html}{LIVE_SCRIPT}"),
+    }
+}
+
+fn respond(request: Request, status: u16, content_type: &str, body: String) {
+    let response = Response::from_string(body)
+        .with_status_code(status)
+        .with_header(header("Content-Type", content_type))
+        .with_header(header("Cache-Control", "no-store"));
+    let _ = request.respond(response);
+}
+
+fn header(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static header values are valid")
+}
+
+fn content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+    {
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "pdf" => "application/pdf",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        _ => "application/octet-stream",
+    }
+}

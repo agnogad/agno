@@ -1,0 +1,7 @@
+baseURL = "https://example.com/"
+title = "Bench"
+languageCode = "en"
+disableKinds = ["robotsTXT"]
+
+[markup.highlight]
+noClasses = false

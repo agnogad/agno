@@ -1,0 +1,100 @@
+:root {
+  --bg: #fcfcfa;
+  --fg: #1d1d1b;
+  --muted: #6b6b66;
+  --line: #e4e4df;
+  --accent: #0b6b53;
+  --code: #f2f2ee;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141412;
+    --fg: #e8e8e3;
+    --muted: #9a9a93;
+    --line: #2c2c28;
+    --accent: #6fd3b1;
+    --code: #1d1d1a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.65;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 46rem;
+  padding: 2rem 1.25rem 4rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+a { color: var(--accent); text-underline-offset: 2px; }
+
+.site-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 2rem;
+}
+
+.brand { font-weight: 650; text-decoration: none; color: var(--fg); }
+.site-header nav { display: flex; gap: 1rem; font-size: 0.95rem; }
+
+h1, h2, h3 { line-height: 1.25; letter-spacing: -0.01em; }
+h1 { font-size: 1.9rem; margin: 0 0 1rem; }
+
+.meta { color: var(--muted); font-size: 0.9rem; margin: -0.5rem 0 1.5rem; }
+
+.post-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 1.25rem; }
+.post-list li { display: flex; flex-direction: column; gap: 0.15rem; }
+.post-list a { font-weight: 600; text-decoration: none; }
+.post-list time { color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.post-list p { margin: 0.2rem 0 0; color: var(--muted); }
+
+.content img { max-width: 100%; height: auto; }
+
+.content pre {
+  background: var(--code);
+  padding: 1rem;
+  overflow-x: auto;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.content code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+}
+
+.content :not(pre) > code {
+  background: var(--code);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+
+.content blockquote {
+  margin: 0;
+  padding-left: 1rem;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+
+.content table { border-collapse: collapse; width: 100%; }
+.content td, .content th { border: 1px solid var(--line); padding: 0.4rem 0.6rem; text-align: left; }
+
+footer {
+  margin-top: 4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
