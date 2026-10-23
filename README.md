@@ -268,6 +268,21 @@ pages/s for Hugo. The full matrix, raw samples, and reproduction steps are in
 > release is 0.2.0; rerun [`bench/suite.py`](bench/suite.py) to measure your own
 > machine.
 
+### Search index cost (agno 0.2.0)
+
+The search index is optional and off by default. On the same corpus, toggling
+`search_index` costs:
+
+| Posts | `lists+feeds` off | on | Delta | Output off | on | `search-index.json` |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 7.0 ms | 9.0 ms | **+2.0 ms** | 3.50 MB | 3.87 MB | 0.37 MB |
+| 10,000 | 74.0 ms | 87.0 ms | **+13.0 ms** | 34.90 MB | 38.61 MB | 3.71 MB |
+
+`lists+feeds` is the build phase that writes the index, so its delta isolates
+the index from content loading and page rendering. Whole-build wall-clock
+deltas were within run-to-run noise. Raw samples and method:
+[`bench/SEARCH_INDEX.md`](bench/SEARCH_INDEX.md).
+
 > **Fairness note:** the Astro fixture renders Markdown pages only and does not
 > include syntax highlighting, taxonomies, RSS, or a sitemap. Its timings are
 > optimistic. agno and Hugo both perform real syntax highlighting (syntect /

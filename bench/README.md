@@ -14,6 +14,17 @@ For a quick single scenario:
 python3 bench/run.py --count 1000 --runs 5 --profile code
 ```
 
+## Search index cost
+
+`search_index.py` runs the same corpus with `search_index` off and on. It
+reports whole-build wall time, the `lists+feeds` phase that writes
+`search-index.json`, and output size, then writes `SEARCH_INDEX.md` and
+`search-index.json`.
+
+```sh
+python3 bench/search_index.py --counts 1000 10000 --runs 9 --profile code
+```
+
 ## Corpus
 
 `gen.py` writes N posts (YAML frontmatter, tags, deterministic prose) into each
