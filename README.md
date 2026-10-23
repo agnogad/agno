@@ -368,7 +368,13 @@ they skip that work entirely: at 10,000 posts a rebuild costs about **1/12** of
 a cold build.
 
 Each cell is the fastest of 4–9 alternating runs of the 0.2.0 and 0.3.0
-binaries against the same corpus. Reproduce the rebuild numbers with:
+binaries against the same corpus. The cold column is dominated by the
+filesystem rather than by agno: on the benchmark host's Btrfs volume
+(`compress=zstd`), deleting the previous 10,000-file output tree takes 1.2 s and
+writing the new one about another second, which is why the same build finishes
+in about one second on the ext4 machine used for the older numbers above.
+
+Reproduce the rebuild numbers with:
 
 ```sh
 python3 bench/incremental.py --count 10000 --runs 5

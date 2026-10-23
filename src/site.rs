@@ -1020,19 +1020,26 @@ fn push_url(out: &mut String, cfg: &Config, url: &str, date: Option<OffsetDateTi
 
 pub fn remove_all(path: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
+    if meta.file_type().is_symlink() || !meta.is_dir() {
         return fs::remove_file(path);
     }
-    if !meta.is_dir() {
-        return fs::remove_file(path);
-    }
-    let entries: Vec<PathBuf> = fs::read_dir(path)?
+    // `DirEntry::file_type` is served from readdir's `d_type` on Linux, so this
+    // avoids one `statx` per entry: a 10,000-page site has 10,000 of them and
+    // they dominate deleting the output tree.
+    let entries: Vec<(PathBuf, bool)> = fs::read_dir(path)?
         .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
+        .map(|entry| {
+            let is_dir = match entry.file_type() {
+                Ok(kind) => kind.is_dir(),
+                Err(_) => fs::symlink_metadata(entry.path())
+                    .map(|meta| meta.is_dir())
+                    .unwrap_or(false),
+            };
+            (entry.path(), is_dir)
+        })
         .collect();
-    entries.par_iter().try_for_each(|entry| {
-        let meta = fs::symlink_metadata(entry)?;
-        if meta.is_dir() && !meta.file_type().is_symlink() {
+    entries.par_iter().try_for_each(|(entry, is_dir)| {
+        if *is_dir {
             remove_all(entry)
         } else {
             fs::remove_file(entry)
@@ -1082,4 +1089,49 @@ fn rel_string(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_all;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("agno-rm-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn remove_all_deletes_a_nested_tree() {
+        let root = scratch("nested");
+        let dist = root.join("dist");
+        fs::create_dir_all(dist.join("blog/post")).unwrap();
+        fs::write(dist.join("blog/post/index.html"), "<p>hi</p>").unwrap();
+        fs::write(dist.join("style.css"), "body{}").unwrap();
+
+        remove_all(&dist).unwrap();
+
+        assert!(!dist.exists());
+        assert!(root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_all_unlinks_symlinks_without_following_them() {
+        let root = scratch("symlink");
+        let outside = root.join("outside.txt");
+        fs::write(&outside, "keep me").unwrap();
+        let dist = root.join("dist");
+        fs::create_dir_all(dist.join("nested")).unwrap();
+        std::os::unix::fs::symlink(&outside, dist.join("nested/link.txt")).unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), dist.join("dangling")).unwrap();
+
+        remove_all(&dist).unwrap();
+
+        assert!(!dist.exists());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep me");
+    }
 }
