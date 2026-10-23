@@ -1,6 +1,6 @@
 use agno::config::Config;
 use agno::site::{self, BuildOptions};
-use agno::{scaffold, serve};
+use agno::{check, scaffold, serve};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -62,6 +62,15 @@ enum Command {
         #[arg(short, long)]
         root: Option<PathBuf>,
     },
+    /// Check content for broken links, missing templates and other problems
+    Check {
+        /// Include drafts
+        #[arg(long)]
+        drafts: bool,
+        /// Site root (defaults to the current directory)
+        #[arg(short, long)]
+        root: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -114,6 +123,24 @@ fn main() -> Result<()> {
                     .with_context(|| format!("removing {}", cache.display()))?;
             }
             println!("Cleaned {}", output.display());
+        }
+        Command::Check { drafts, root } => {
+            let root = root.unwrap_or_else(|| PathBuf::from("."));
+            let report = check::check(&root, drafts)?;
+            print!("{}", check::render(&report));
+            if !report.ok() {
+                eprintln!(
+                    "\n{} error(s) across {} pages ({} internal links checked)",
+                    report.errors.len(),
+                    report.pages,
+                    report.links
+                );
+                std::process::exit(1);
+            }
+            println!(
+                "Checked {} pages and {} internal links: no problems",
+                report.pages, report.links
+            );
         }
     }
 

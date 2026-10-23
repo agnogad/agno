@@ -28,6 +28,8 @@ pub struct Page {
     pub summary: String,
     pub tags: Vec<String>,
     pub categories: Vec<String>,
+    /// Extra URLs that should redirect to this page, already normalised.
+    pub aliases: Vec<String>,
     pub template: Option<String>,
     pub extra: Value,
     /// Markdown body, kept until the page is rendered so unchanged pages can
@@ -362,6 +364,7 @@ fn load_page(
         summary,
         tags: field_string_list(&fm, "tags"),
         categories: field_string_list(&fm, "categories"),
+        aliases: parse_aliases(&fm, path)?,
         template: field_str(&fm, "template"),
         extra: fm,
         body: body.to_string(),
@@ -389,6 +392,7 @@ fn empty_page(title: String, url: String) -> Page {
         summary: String::new(),
         tags: Vec::new(),
         categories: Vec::new(),
+        aliases: Vec::new(),
         template: None,
         extra: Value::Object(Default::default()),
         body: String::new(),
@@ -496,6 +500,16 @@ fn field_usize(fm: &Value, key: &str) -> Option<usize> {
         Value::String(s) => s.trim().parse().ok(),
         _ => None,
     }
+}
+
+fn parse_aliases(fm: &Value, path: &Path) -> Result<Vec<String>> {
+    field_string_list(fm, "aliases")
+        .into_iter()
+        .map(|alias| {
+            normalize_url(&alias)
+                .with_context(|| format!("invalid alias {alias:?} in {}", path.display()))
+        })
+        .collect()
 }
 
 fn field_string_list(fm: &Value, key: &str) -> Vec<String> {

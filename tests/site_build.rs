@@ -577,3 +577,109 @@ fn sections_can_paginate_their_pages() {
     assert!(!third.contains("Older →"), "last page has no next link");
     assert!(!root.join("dist/blog/page/4").exists());
 }
+
+#[test]
+fn aliases_emit_redirect_pages() {
+    let root = fixture("aliases");
+    fs::write(
+        root.join("content/blog/moved.md"),
+        "+++\ntitle = \"Moved\"\ndate = 2024-02-02\naliases = [\"/old-post/\", \"legacy/moved\"]\n+++\n\nBody.\n",
+    )
+    .unwrap();
+
+    build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+        },
+    )
+    .unwrap();
+
+    let alias = text(&root.join("dist/old-post/index.html"));
+    assert!(alias.contains("http-equiv=\"refresh\""), "{alias}");
+    assert!(alias.contains("https://example.com/blog/moved/"), "{alias}");
+    assert!(alias.contains("rel=\"canonical\""), "{alias}");
+    assert!(root.join("dist/legacy/moved/index.html").is_file());
+
+    let sitemap = text(&root.join("dist/sitemap.xml"));
+    assert!(
+        !sitemap.contains("old-post"),
+        "aliases stay out of the sitemap"
+    );
+}
+
+#[test]
+fn an_alias_that_collides_with_a_page_is_rejected() {
+    let root = fixture("alias-conflict");
+    fs::write(
+        root.join("content/blog/moved.md"),
+        "+++\ntitle = \"Moved\"\naliases = [\"/blog/hello/\"]\n+++\n\nBody.\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate output URL"), "{err}");
+}
+
+#[test]
+fn check_accepts_a_clean_site() {
+    let root = fixture("check-clean");
+    let report = agno::check::check(&root, false).unwrap();
+    assert!(report.ok(), "{:?}", report.errors);
+    assert_eq!(report.pages, 2);
+}
+
+#[test]
+fn check_reports_broken_internal_links() {
+    let root = fixture("check-broken");
+    fs::write(
+        root.join("content/blog/broken.md"),
+        "+++\ntitle = \"Broken\"\ndate = 2024-01-01\n+++\n\n[ok](/blog/hello/)\n\n[bad](/nope/)\n",
+    )
+    .unwrap();
+
+    let report = agno::check::check(&root, false).unwrap();
+    assert!(!report.ok());
+    assert!(
+        report.errors.iter().any(|error| error.contains("/nope/")),
+        "{:?}",
+        report.errors
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("broken.md")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn check_flags_a_missing_page_template() {
+    let root = fixture("check-template");
+    fs::write(
+        root.join("content/blog/odd.md"),
+        "+++\ntitle = \"Odd\"\ntemplate = \"nope.html\"\n+++\n\nBody.\n",
+    )
+    .unwrap();
+
+    let report = agno::check::check(&root, false).unwrap();
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("template nope.html does not exist")),
+        "{:?}",
+        report.errors
+    );
+}

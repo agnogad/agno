@@ -203,6 +203,9 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let mut expected = HashSet::new();
     for page in &content.pages {
         expected.insert(output_rel(&page.url));
+        for alias in &page.aliases {
+            expected.insert(output_rel(alias));
+        }
     }
 
     let mut lists: Vec<(ListView<'_>, &[&str])> = Vec::new();
@@ -343,6 +346,11 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         .collect::<Result<Vec<_>>>()?;
     let ms_pages = phase.elapsed().as_millis();
 
+    content
+        .pages
+        .par_iter()
+        .try_for_each(|page| write_aliases(&cfg, page))?;
+
     let phase = Instant::now();
     let mut list_names: Vec<String> = Vec::with_capacity(lists.len());
     for (list, candidates) in &lists {
@@ -423,6 +431,26 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         ms_rest: phase.elapsed().as_millis(),
         output,
     })
+}
+
+fn write_aliases(cfg: &Config, page: &Page) -> Result<()> {
+    for alias in &page.aliases {
+        let body = redirect_page(&cfg.absolute(&page.url), &page.title);
+        write_output(cfg, alias, &body)
+            .with_context(|| format!("writing alias {alias} for {}", page.url))?;
+    }
+    Ok(())
+}
+
+fn redirect_page(target: &str, title: &str) -> String {
+    let target = escape_html(target);
+    let title = escape_html(title);
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+<title>Redirecting to {title}</title>\n<link rel=\"canonical\" href=\"{target}\">\n\
+<meta http-equiv=\"refresh\" content=\"0; url={target}\">\n<meta name=\"robots\" content=\"noindex\">\n\
+</head>\n<body>\n<p>Redirecting to <a href=\"{target}\">{title}</a>.</p>\n</body>\n</html>\n"
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -569,7 +597,7 @@ fn output_path(cfg: &Config, url: &str) -> PathBuf {
     cfg.output().join(output_rel(url))
 }
 
-fn output_rel(url: &str) -> String {
+pub fn output_rel(url: &str) -> String {
     let mut segments: Vec<&str> = url
         .split('/')
         .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
@@ -585,6 +613,10 @@ fn ancestors(path: &str) -> Vec<&str> {
         .filter(|(_, ch)| *ch == '/')
         .map(|(index, _)| &path[..index])
         .collect()
+}
+
+pub fn validate_outputs(cfg: &Config, content: &Content) -> Result<()> {
+    validate_urls(cfg, content)
 }
 
 fn validate_urls(cfg: &Config, content: &Content) -> Result<()> {
@@ -618,6 +650,9 @@ fn validate_urls(cfg: &Config, content: &Content) -> Result<()> {
     }
     for page in &content.pages {
         add(&page.url, &format!("page {}", page.source.display()))?;
+        for alias in &page.aliases {
+            add(alias, &format!("alias of {}", page.url))?;
+        }
     }
     for section in &content.sections {
         add(&section.url, &format!("section {}", section.key))?;
