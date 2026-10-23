@@ -39,7 +39,8 @@ marketing pages.
   in about one second on the [benchmark machine](#benchmarks).
 - **Incremental by default.** A build remembers what it rendered, so a rebuild
   only touches the pages whose source, templates or site context changed:
-  1,000 posts rebuild in ~27 ms, and editing one post costs ~40 ms.
+  1,000 posts rebuild in ~23 ms, and at 10,000 posts a rebuild costs about a
+  twelfth of a full build.
 - **One static binary.** The release binary is 4.2 MB and has no runtime
   dependencies. No `node_modules`, no language runtime, no service to install.
 - **Small, understandable surface.** A focused feature set instead of a plugin
@@ -341,12 +342,25 @@ manifest diff.
 
 | Posts | Cold (`--clean`) | No-op rebuild | One post edited |
 | ---: | ---: | ---: | ---: |
-| 1,000 | 204 ms | **27 ms** | **40 ms** |
-| 10,000 | 1,607 ms | **225 ms** | **227 ms** |
+| 1,000 | 60 ms | **23 ms** | **23 ms** |
+| 10,000 | 2.9 s | **234 ms** | **224 ms** |
 
-At 10,000 posts a rebuild costs about **1/7** of a cold build. The numbers are
-the fastest of 7 (1,000 posts) and 5 (10,000 posts) samples on a host with a
-load average around 7, so medians run higher; reproduce them with:
+Wall-clock on a busy host swings by 30% between runs, so the table below
+compares CPU time (`user` + `sys`), which does not. It also shows what 0.3.0
+changed for full rebuilds, which cannot skip any work:
+
+| Posts | Cold build, 0.2.0 → 0.3.0 | Rebuild, 0.2.0 → 0.3.0 |
+| ---: | ---: | ---: |
+| 1,000 | 206 → 235 ms (+14%) | 145 → 78 ms (**1.9× less**) |
+| 10,000 | 8.8 → 10.0 s (+14%) | 4.8 → 0.74 s (**6.5× less**) |
+
+The 14% cold-build cost is the table of contents, word counts, and fingerprint
+bookkeeping that every page now pays for. Rebuilds are 2–6.5× cheaper because
+they skip that work entirely: at 10,000 posts a rebuild costs about **1/12** of
+a cold build.
+
+Each cell is the fastest of 4–9 alternating runs of the 0.2.0 and 0.3.0
+binaries against the same corpus. Reproduce the rebuild numbers with:
 
 ```sh
 python3 bench/incremental.py --count 10000 --runs 5
