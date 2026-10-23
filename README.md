@@ -122,6 +122,7 @@ The generated site is in `dist/` and can be deployed to any static host.
 | --- | --- |
 | `agno new <dir>` | Scaffold a new site with the default theme, content, and config |
 | `agno build` | Build the site into `dist/` |
+| `agno build --no-clean` | Rebuild without deleting `dist/`; stale generated files are still removed |
 | `agno build --drafts` | Include pages marked `draft = true` |
 | `agno build --stats` | Print content, page, and feed timings |
 | `agno dev` | Build, serve on port 1111, and rebuild on file changes |
@@ -131,6 +132,10 @@ The generated site is in `dist/` and can be deployed to any static host.
 
 `build`, `dev`, and `clean` accept `--root <dir>` to operate on another site
 directory. `new` accepts `--force` to write into a non-empty directory.
+
+`agno build --no-clean` keeps unchanged output files in place and uses the
+manifest in `.agno-cache/` to delete pages, feeds, or static files that no
+longer exist. It is the same mode `agno dev` uses between rebuilds.
 
 ## Content
 
@@ -176,7 +181,8 @@ content/blog/hello/index.md  →  /blog/hello/
 ```
 
 Filenames can start with a date. `2024-05-01-hello.md` sets the date and derives
-the slug automatically.
+the slug automatically. URL path segments are slugified, `slug` overrides the
+last segment, and tags that slugify to the same value share one tag page.
 
 ## Templates
 
@@ -234,6 +240,9 @@ url = "/about/"
 
 Set `search_index = true` to emit `search-index.json` for client-side search.
 `page.date_display` follows `language` for Turkish and English month names.
+`output_dir` must stay inside the site root and must not overlap `content_dir`,
+`templates_dir`, or `static_dir`; agno rejects unsafe values instead of deleting
+your inputs.
 
 ## Benchmarks
 
@@ -282,6 +291,14 @@ The search index is optional and off by default. On the same corpus, toggling
 the index from content loading and page rendering. Whole-build wall-clock
 deltas were within run-to-run noise. Raw samples and method:
 [`bench/SEARCH_INDEX.md`](bench/SEARCH_INDEX.md).
+
+### No-clean rebuild (agno 0.2.0)
+
+On the same 10,000-post `code` corpus, `agno build` (clean) took about **1.2 s**
+and `agno build --no-clean` took about **0.82 s** (median of 5 alternating runs
+on the host above). The no-clean path still renders every page; it skips
+deleting the output tree and uses `.agno-cache/outputs.json` to remove only
+stale files.
 
 > **Fairness note:** the Astro fixture renders Markdown pages only and does not
 > include syntax highlighting, taxonomies, RSS, or a sitemap. Its timings are

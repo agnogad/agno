@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -87,7 +87,90 @@ impl Config {
         self.path(&self.output_dir)
     }
 
+    /// Reject output paths that could delete the site or another input directory.
+    pub fn validate(&self) -> Result<()> {
+        let root = normalize(&self.root);
+        let output = normalize(&self.output());
+
+        if output == root {
+            bail!("output_dir must not be the site root");
+        }
+        if root.as_os_str().is_empty() {
+            if output.is_absolute() || output.starts_with("..") {
+                bail!("output_dir must stay inside the site root");
+            }
+        } else if !output.starts_with(&root) {
+            bail!("output_dir must stay inside the site root");
+        }
+
+        for (name, dir) in [
+            ("content_dir", &self.content_dir),
+            ("templates_dir", &self.templates_dir),
+            ("static_dir", &self.static_dir),
+        ] {
+            let dir = normalize(&self.path(dir));
+            if output.starts_with(&dir) || dir.starts_with(&output) {
+                bail!("output_dir must not overlap {name}");
+            }
+        }
+
+        let output_path = self.output();
+        if let Ok(meta) = std::fs::symlink_metadata(&output_path) {
+            if meta.file_type().is_symlink() {
+                bail!("output_dir must not be a symlink");
+            }
+        }
+        if let (Ok(root), Ok(parent)) = (
+            self.root.canonicalize(),
+            output_path.parent().unwrap_or(&output_path).canonicalize(),
+        ) {
+            if !parent.starts_with(&root) {
+                bail!("output_dir must stay inside the site root");
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn absolute(&self, url: &str) -> String {
         format!("{}{}", self.base_url, url)
+    }
+}
+
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(root: &str, output: &str) -> Config {
+        Config {
+            root: root.into(),
+            output_dir: output.into(),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn output_dir_must_stay_inside_the_site() {
+        assert!(config(".", "dist").validate().is_ok());
+        assert!(config(".", ".").validate().is_err());
+        assert!(config(".", "../outside").validate().is_err());
+        assert!(config(".", "/tmp/agno-outside").validate().is_err());
+        assert!(config(".", "content").validate().is_err());
     }
 }

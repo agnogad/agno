@@ -34,6 +34,9 @@ enum Command {
         /// Print per-phase timings
         #[arg(long)]
         stats: bool,
+        /// Keep existing output and remove only stale generated files
+        #[arg(long)]
+        no_clean: bool,
         /// Site root (defaults to the current directory)
         #[arg(short, long)]
         root: Option<PathBuf>,
@@ -70,6 +73,7 @@ fn main() -> Result<()> {
         Command::Build {
             drafts,
             stats,
+            no_clean,
             root,
         } => {
             let root = root.unwrap_or_else(|| PathBuf::from("."));
@@ -77,7 +81,7 @@ fn main() -> Result<()> {
                 &root,
                 &BuildOptions {
                     drafts,
-                    clean: true,
+                    clean: !no_clean,
                 },
             )?;
             if stats {
@@ -100,6 +104,7 @@ fn main() -> Result<()> {
         Command::Clean { root } => {
             let root = root.unwrap_or_else(|| PathBuf::from("."));
             let cfg = Config::load(&root)?;
+            cfg.validate()?;
             let output = cfg.output();
             if output.exists() {
                 agno::site::remove_all(&output)

@@ -3,12 +3,13 @@ use crate::content::{self, Content, Page};
 use crate::markdown::escape_html;
 use crate::render::Templates;
 use crate::theme;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use minijinja::context;
 use minijinja::value::Serde;
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -21,6 +22,7 @@ pub struct BuildOptions {
     pub clean: bool,
 }
 
+#[derive(Debug)]
 pub struct Stats {
     pub pages: usize,
     pub ms_total: u128,
@@ -101,31 +103,68 @@ struct ListView<'a> {
     pages: Vec<CardView<'a>>,
 }
 
+struct PageIndex<'a> {
+    sections: HashMap<&'a str, Vec<&'a Page>>,
+    tags: HashMap<String, Vec<&'a Page>>,
+}
+
+impl<'a> PageIndex<'a> {
+    fn new(pages: &'a [Page]) -> Self {
+        let mut sections: HashMap<&str, Vec<&Page>> = HashMap::new();
+        let mut tags: HashMap<String, Vec<&Page>> = HashMap::new();
+        for page in pages {
+            if let Some(section) = page.section.as_deref() {
+                sections.entry(section).or_default().push(page);
+            }
+            let mut seen = HashSet::new();
+            for tag in &page.tags {
+                let slug = content::slugify(tag);
+                if !slug.is_empty() && seen.insert(slug.clone()) {
+                    tags.entry(slug).or_default().push(page);
+                }
+            }
+        }
+        Self { sections, tags }
+    }
+
+    fn section(&self, key: &str) -> &[&'a Page] {
+        self.sections.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    fn tag(&self, key: &str) -> &[&'a Page] {
+        self.tags.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Manifest {
+    output: String,
+    files: Vec<String>,
+}
+
 pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let started = Instant::now();
     let cfg = Config::load(root)?;
+    cfg.validate()?;
 
     let phase = Instant::now();
     let content = content::load(&cfg, opts.drafts)?;
+    validate_urls(&cfg, &content)?;
     let ms_load = phase.elapsed().as_millis();
 
     let templates = Templates::load(&cfg.templates())?;
-    let site = site_view(&cfg, &content);
+    let index = PageIndex::new(&content.pages);
+    let site = site_view(&cfg, &content, &index);
     let output = cfg.output();
     if opts.clean && output.exists() {
         remove_all(&output).with_context(|| format!("cleaning {}", output.display()))?;
     }
     fs::create_dir_all(&output).with_context(|| format!("creating {}", output.display()))?;
 
-    let phase = Instant::now();
-    content
-        .pages
-        .par_iter()
-        .map(|page| render_page(&cfg, &templates, &site, page))
-        .collect::<Result<Vec<_>>>()?;
-    let ms_pages = phase.elapsed().as_millis();
-
-    let phase = Instant::now();
+    let mut expected = HashSet::new();
+    for page in &content.pages {
+        expected.insert(output_rel(&page.url));
+    }
 
     let mut lists: Vec<(ListView<'_>, &[&str])> = Vec::new();
     lists.push((
@@ -145,10 +184,10 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
                 url: &section.url,
                 description: &section.description,
                 content: &section.content,
-                pages: content
-                    .pages
+                pages: index
+                    .section(&section.key)
                     .iter()
-                    .filter(|page| page.section.as_deref() == Some(section.key.as_str()))
+                    .copied()
                     .map(card)
                     .collect(),
             },
@@ -162,12 +201,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
                 url: &tag.url,
                 description: "",
                 content: "",
-                pages: content
-                    .pages
-                    .iter()
-                    .filter(|page| page.tags.iter().any(|name| name == &tag.key))
-                    .map(card)
-                    .collect(),
+                pages: index.tag(&tag.key).iter().copied().map(card).collect(),
             },
             &["tag.html", "section.html"],
         ));
@@ -182,6 +216,32 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         },
         &["404.html"],
     ));
+    expected.extend(lists.iter().map(|(list, _)| output_rel(list.url)));
+    expected.insert("rss.xml".into());
+    expected.insert("sitemap.xml".into());
+    expected.insert("robots.txt".into());
+    expected.insert("style.css".into());
+    if cfg.search_index {
+        expected.insert("search-index.json".into());
+    }
+    let static_files = static_files(&cfg)?;
+    let static_paths = static_rels(&cfg, &static_files)?;
+    let has_static_style = static_paths.iter().any(|path| path == "style.css");
+    expected.extend(static_paths);
+
+    if !opts.clean {
+        remove_stale(root, &output, &expected)?;
+    }
+
+    let phase = Instant::now();
+    content
+        .pages
+        .par_iter()
+        .map(|page| render_page(&cfg, &templates, &site, page))
+        .collect::<Result<Vec<_>>>()?;
+    let ms_pages = phase.elapsed().as_millis();
+
+    let phase = Instant::now();
     lists.par_iter().try_for_each(|(list, candidates)| {
         render_list(&cfg, &templates, &site, list, candidates)
     })?;
@@ -201,10 +261,12 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         ),
     )?;
 
-    copy_static(&cfg)?;
-    if !output.join("style.css").exists() {
+    copy_static(&cfg, &static_files)?;
+    if !has_static_style {
         fs::write(output.join("style.css"), theme::STYLE).context("writing default style.css")?;
     }
+
+    write_manifest(root, &output, &expected)?;
 
     Ok(Stats {
         pages: content.pages.len(),
@@ -222,13 +284,13 @@ fn render_page(
     site: &SiteView<'_>,
     page: &Page,
 ) -> Result<()> {
-    let name = page
-        .template
-        .as_deref()
-        .filter(|name| templates.has(name))
-        .map(str::to_string)
-        .or_else(|| templates.first(&["page.html"]))
-        .with_context(|| format!("no template for page {}", page.url))?;
+    let name = match page.template.as_deref() {
+        Some(name) if templates.has(name) => name.to_string(),
+        Some(name) => bail!("template {name} not found for page {}", page.url),
+        None => templates
+            .first(&["page.html"])
+            .with_context(|| format!("no template for page {}", page.url))?,
+    };
     let view = page_view(page);
     let cards: Vec<CardView> = Vec::new();
     let ctx = context! {
@@ -236,7 +298,9 @@ fn render_page(
         page => Serde(&view),
         pages => Serde(&cards),
     };
-    let html = templates.render(&name, ctx)?;
+    let html = templates
+        .render(&name, ctx)
+        .with_context(|| format!("rendering page {}", page.url))?;
     write_output(cfg, &page.url, &html)
 }
 
@@ -247,16 +311,18 @@ fn render_list(
     list: &ListView<'_>,
     candidates: &[&str],
 ) -> Result<()> {
+    let url = list.url;
     let name = templates
         .first(candidates)
-        .with_context(|| format!("no template found among {candidates:?}"))?;
-    let url = list.url;
+        .with_context(|| format!("no template found for {url} among {candidates:?}"))?;
     let ctx = context! {
         site => Serde(site),
         page => Serde(list),
         pages => Serde(&list.pages),
     };
-    let html = templates.render(&name, ctx)?;
+    let html = templates
+        .render(&name, ctx)
+        .with_context(|| format!("rendering list {url}"))?;
     write_output(cfg, url, &html)
 }
 
@@ -269,15 +335,125 @@ fn write_output(cfg: &Config, url: &str, html: &str) -> Result<()> {
 }
 
 fn output_path(cfg: &Config, url: &str) -> PathBuf {
+    cfg.output().join(output_rel(url))
+}
+
+fn output_rel(url: &str) -> String {
     let mut segments: Vec<&str> = url
         .split('/')
         .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
         .collect();
-    match segments.last() {
-        Some(last) if last.contains('.') => {}
-        _ => segments.push("index.html"),
+    if url.ends_with('/') || segments.is_empty() {
+        segments.push("index.html");
     }
-    cfg.output().join(segments.join("/"))
+    segments.join("/")
+}
+
+fn ancestors(path: &str) -> Vec<&str> {
+    path.char_indices()
+        .filter(|(_, ch)| *ch == '/')
+        .map(|(index, _)| &path[..index])
+        .collect()
+}
+
+fn validate_urls(cfg: &Config, content: &Content) -> Result<()> {
+    let mut files: HashMap<String, String> = HashMap::new();
+    let mut dirs: HashSet<String> = HashSet::new();
+    let mut add = |url: &str, what: &str| -> Result<()> {
+        let key = output_rel(url).to_ascii_lowercase();
+        if let Some(existing) = files.insert(key.clone(), what.to_string()) {
+            bail!("duplicate output URL {url}: {existing} and {what}");
+        }
+        if dirs.contains(&key) {
+            bail!("output path conflict at {url}: another output is below it");
+        }
+        for parent in ancestors(&key) {
+            if let Some(existing) = files.get(parent) {
+                bail!("output path conflict at {url}: {existing} is a file at {parent}");
+            }
+            dirs.insert(parent.to_string());
+        }
+        Ok(())
+    };
+
+    add("/", "home")?;
+    add("/404.html", "404 page")?;
+    add("/style.css", "default stylesheet")?;
+    add("/rss.xml", "RSS feed")?;
+    add("/sitemap.xml", "sitemap")?;
+    add("/robots.txt", "robots.txt")?;
+    if cfg.search_index {
+        add("/search-index.json", "search index")?;
+    }
+    for page in &content.pages {
+        add(&page.url, &format!("page {}", page.source.display()))?;
+    }
+    for section in &content.sections {
+        add(&section.url, &format!("section {}", section.key))?;
+    }
+    for tag in &content.tags {
+        add(&tag.url, &format!("tag {}", tag.title))?;
+    }
+    Ok(())
+}
+
+fn manifest_path(root: &Path) -> PathBuf {
+    root.join(".agno-cache").join("outputs.json")
+}
+
+fn read_manifest(root: &Path) -> Option<Manifest> {
+    let src = fs::read_to_string(manifest_path(root)).ok()?;
+    serde_json::from_str(&src).ok()
+}
+
+fn write_manifest(root: &Path, output: &Path, expected: &HashSet<String>) -> Result<()> {
+    let path = manifest_path(root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut files: Vec<String> = expected.iter().cloned().collect();
+    files.sort();
+    let manifest = Manifest {
+        output: output.to_string_lossy().to_string(),
+        files,
+    };
+    let body = serde_json::to_string(&manifest).context("serializing build manifest")?;
+    fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
+}
+
+fn remove_stale(root: &Path, output: &Path, expected: &HashSet<String>) -> Result<()> {
+    let Some(manifest) = read_manifest(root) else {
+        return Ok(());
+    };
+    if manifest.output != output.to_string_lossy().as_ref() {
+        return Ok(());
+    }
+    for rel in manifest.files {
+        if expected.contains(&rel)
+            || rel.is_empty()
+            || rel.starts_with('/')
+            || rel.split('/').any(|part| part == "." || part == "..")
+        {
+            continue;
+        }
+        let path = output.join(&rel);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                let mut parent = path.parent();
+                while let Some(dir) = parent {
+                    if dir == output || fs::remove_dir(dir).is_err() {
+                        break;
+                    }
+                    parent = dir.parent();
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("removing stale {}", path.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_text(output: &Path, name: &str, body: &str) -> Result<()> {
@@ -285,7 +461,7 @@ fn write_text(output: &Path, name: &str, body: &str) -> Result<()> {
     fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
-fn site_view<'a>(cfg: &Config, content: &'a Content) -> SiteView<'a> {
+fn site_view<'a>(cfg: &Config, content: &'a Content, index: &PageIndex<'a>) -> SiteView<'a> {
     let post_count = content
         .pages
         .iter()
@@ -295,20 +471,12 @@ fn site_view<'a>(cfg: &Config, content: &'a Content) -> SiteView<'a> {
         .tags
         .iter()
         .map(|tag| {
-            let mut count = 0;
-            let mut latest = None;
-            for page in &content.pages {
-                if page.tags.iter().any(|name| name == &tag.key) {
-                    count += 1;
-                    if latest.is_none() {
-                        latest = Some(page);
-                    }
-                }
-            }
+            let pages = index.tag(&tag.key);
+            let latest = pages.first().copied();
             TagView {
                 name: &tag.title,
                 url: &tag.url,
-                count,
+                count: pages.len(),
                 latest_title: latest.map(|page| page.title.as_str()).unwrap_or_default(),
                 latest_url: latest.map(|page| page.url.as_str()).unwrap_or_default(),
             }
@@ -434,12 +602,20 @@ fn sitemap(cfg: &Config, content: &Content) -> String {
 }
 
 pub fn remove_all(path: &Path) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return fs::remove_file(path);
+    }
+    if !meta.is_dir() {
+        return fs::remove_file(path);
+    }
     let entries: Vec<PathBuf> = fs::read_dir(path)?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .collect();
     entries.par_iter().try_for_each(|entry| {
-        if entry.is_dir() {
+        let meta = fs::symlink_metadata(entry)?;
+        if meta.is_dir() && !meta.file_type().is_symlink() {
             remove_all(entry)
         } else {
             fs::remove_file(entry)
@@ -448,19 +624,30 @@ pub fn remove_all(path: &Path) -> std::io::Result<()> {
     fs::remove_dir(path)
 }
 
-fn copy_static(cfg: &Config) -> Result<()> {
+fn static_files(cfg: &Config) -> Result<Vec<PathBuf>> {
     let src = cfg.static_dir();
     if !src.is_dir() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    let dest = cfg.output();
-    let files: Vec<PathBuf> = WalkDir::new(&src)
+    Ok(WalkDir::new(&src)
         .into_iter()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
-        .collect();
+        .collect())
+}
 
+fn static_rels(cfg: &Config, files: &[PathBuf]) -> Result<Vec<String>> {
+    let src = cfg.static_dir();
+    files
+        .iter()
+        .map(|file| Ok(rel_string(file.strip_prefix(&src)?)))
+        .collect()
+}
+
+fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
+    let src = cfg.static_dir();
+    let dest = cfg.output();
     files.par_iter().try_for_each(|file| {
         let rel = file.strip_prefix(&src)?;
         let target = dest.join(rel);
@@ -471,4 +658,11 @@ fn copy_static(cfg: &Config) -> Result<()> {
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())
+}
+
+fn rel_string(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }

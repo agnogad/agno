@@ -146,10 +146,12 @@ fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
 }
 
 fn resolve(dist: &Path, url_path: &str) -> Option<PathBuf> {
-    if url_path.contains("..") || url_path.contains('\\') {
+    let url_path = url_path.split(['?', '#']).next().unwrap_or("");
+    let decoded = percent_decode(url_path)?;
+    if decoded.contains("..") || decoded.contains('\\') || decoded.contains('\0') {
         return None;
     }
-    let rel = url_path.trim_start_matches('/');
+    let rel = decoded.trim_start_matches('/');
     let base = dist.join(rel);
     if base.is_dir() {
         let index = base.join("index.html");
@@ -163,6 +165,36 @@ fn resolve(dist: &Path, url_path: &str) -> Option<PathBuf> {
         return index.is_file().then_some(index);
     }
     None
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = hex(bytes[i + 1])?;
+            let lo = hex(bytes[i + 2])?;
+            out.push(hi * 16 + lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn inject(html: &str) -> String {
@@ -211,5 +243,42 @@ fn content_type(path: &Path) -> &'static str {
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn percent_decode_handles_spaces_and_rejects_traversal() {
+        assert_eq!(
+            percent_decode("/hello%20world/").as_deref(),
+            Some("/hello world/")
+        );
+        assert_eq!(
+            percent_decode("/%2e%2e/secret").as_deref(),
+            Some("/../secret")
+        );
+        assert_eq!(percent_decode("/bad%zz"), None);
+    }
+
+    #[test]
+    fn resolve_decodes_paths_and_stays_inside_dist() {
+        let dist = std::env::temp_dir().join(format!("agno-serve-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dist);
+        fs::create_dir_all(dist.join("hello world")).unwrap();
+        fs::write(dist.join("hello world/index.html"), "hi").unwrap();
+        fs::write(dist.join("secret.txt"), "secret").unwrap();
+
+        assert_eq!(
+            resolve(&dist, "/hello%20world/"),
+            Some(dist.join("hello world/index.html"))
+        );
+        assert_eq!(resolve(&dist, "/../secret.txt"), None);
+        assert_eq!(resolve(&dist, "/%2e%2e/secret.txt"), None);
+
+        let _ = fs::remove_dir_all(&dist);
     }
 }

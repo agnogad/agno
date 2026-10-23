@@ -1,5 +1,6 @@
 /target
 /dist
+/.agno-cache
 /bench/work
 .DS_Store
 __pycache__/

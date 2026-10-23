@@ -1,9 +1,9 @@
 use crate::config::Config;
 use crate::markdown;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::{Rfc2822, Rfc3339};
 use time::macros::format_description;
@@ -122,24 +122,38 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
 
     let home = load_home(cfg, &index_paths)?;
 
-    let section_keys: BTreeSet<String> = pages.iter().filter_map(|p| p.section.clone()).collect();
-    let sections = section_keys
-        .iter()
-        .map(|key| load_listing(cfg, &index_paths, key, &format!("/{key}/")))
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut tag_names: BTreeSet<String> = BTreeSet::new();
-    for page in &pages {
-        for tag in &page.tags {
-            tag_names.insert(tag.clone());
+    let mut section_keys: BTreeSet<String> =
+        pages.iter().filter_map(|p| p.section.clone()).collect();
+    // A section landing page can exist without any child pages.
+    for key in index_paths.keys() {
+        if !key.is_empty() && !key.contains('/') {
+            section_keys.insert(key.clone());
         }
     }
-    let tags = tag_names
+    let sections = section_keys
+        .iter()
+        .map(|key| {
+            let url = format!("/{}/", url_segment(key));
+            load_listing(cfg, &index_paths, key, &url)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Tags are grouped by their URL slug so "Rust" and "rust" share one page.
+    let mut tag_titles: BTreeMap<String, String> = BTreeMap::new();
+    for page in &pages {
+        for tag in &page.tags {
+            let slug = slugify(tag);
+            if !slug.is_empty() {
+                tag_titles.entry(slug).or_insert_with(|| tag.clone());
+            }
+        }
+    }
+    let tags = tag_titles
         .into_iter()
-        .map(|tag| Listing {
-            key: tag.clone(),
-            title: tag.clone(),
-            url: format!("/tags/{}/", slugify(&tag)),
+        .map(|(slug, title)| Listing {
+            key: slug.clone(),
+            title,
+            url: format!("/tags/{slug}/"),
             description: String::new(),
             content: String::new(),
         })
@@ -161,7 +175,8 @@ fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<Pag
     };
     let src =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let (fm, body) = split_frontmatter(&src)?;
+    let (fm, body) = split_frontmatter(&src)
+        .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
     let (html, summary) = markdown::render(body, cfg.highlight);
     let mut page = empty_page(
         field_str(&fm, "title").unwrap_or_else(|| cfg.title.clone()),
@@ -186,7 +201,8 @@ fn load_listing(
     };
     let src =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let (fm, body) = split_frontmatter(&src)?;
+    let (fm, body) = split_frontmatter(&src)
+        .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
     let (html, _) = markdown::render(body, cfg.highlight);
     Ok(Listing {
         key: key.to_string(),
@@ -206,7 +222,8 @@ fn load_page(
 ) -> Result<Option<Page>> {
     let src =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let (fm, body) = split_frontmatter(&src)?;
+    let (fm, body) = split_frontmatter(&src)
+        .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
 
     let draft = field_bool(&fm, "draft").unwrap_or(false);
     if draft && !include_drafts {
@@ -267,30 +284,60 @@ fn load_page(
         stem_clean.to_string()
     };
 
+    let slug = field_str(&fm, "slug")
+        .map(|s| slugify(&s))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let slug = slugify(&default_slug);
+            if slug.is_empty() { "page".into() } else { slug }
+        });
+
     let default_url = if is_bundle_index {
-        if parent.is_empty() {
+        let mut segments: Vec<String> = parent
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(url_segment)
+            .collect();
+        if segments.is_empty() {
             "/".to_string()
         } else {
-            format!("/{parent}/")
+            segments.pop();
+            segments.push(slug.clone());
+            format!("/{}/", segments.join("/"))
         }
     } else {
-        format!("/{rel_no_ext}/")
+        let parent = rel_no_ext
+            .rsplit_once('/')
+            .map(|(head, _)| head)
+            .unwrap_or("");
+        let mut segments: Vec<String> = parent
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(url_segment)
+            .collect();
+        segments.push(slug.clone());
+        format!("/{}/", segments.join("/"))
     };
-    let url = field_str(&fm, "url")
-        .map(|u| normalize_url(&u))
-        .unwrap_or(default_url);
-    let slug = field_str(&fm, "slug").unwrap_or_else(|| slugify(&default_slug));
+    let url = match field_str(&fm, "url") {
+        Some(url) => {
+            normalize_url(&url).with_context(|| format!("invalid url in {}", path.display()))?
+        }
+        None => default_url,
+    };
     let title = field_str(&fm, "title").unwrap_or_else(|| humanize(stem_clean));
 
     let (html, auto_summary) = markdown::render(body, highlight);
     let summary = field_str(&fm, "summary").unwrap_or(auto_summary);
     let description = field_str(&fm, "description").unwrap_or_else(|| summary.clone());
 
-    let section = if rel_no_ext.contains('/') {
-        rel_no_ext.split('/').next().map(|s| s.to_string())
+    let section_source = if is_bundle_index {
+        &parent
     } else {
-        None
+        &rel_no_ext
     };
+    let section = section_source
+        .split_once('/')
+        .map(|(first, _)| first.to_string());
 
     Ok(Some(Page {
         source: path.to_path_buf(),
@@ -363,9 +410,14 @@ pub fn split_frontmatter(src: &str) -> Result<(Value, &str)> {
 
     for (delim, is_toml) in [("+++", true), ("---", false)] {
         if let Some(rest) = src.strip_prefix(delim) {
-            let rest = rest.strip_prefix('\n').unwrap_or(rest);
+            let rest = rest
+                .strip_prefix("\r\n")
+                .or_else(|| rest.strip_prefix('\n'))
+                .unwrap_or(rest);
             if let Some(pos) = rest.find(&format!("\n{delim}")) {
-                let front = &rest[..pos];
+                // The delimiter search lands on the LF; a CRLF file leaves a
+                // trailing CR on the frontmatter, which TOML rejects.
+                let front = rest[..pos].trim_end_matches('\r');
                 let body = &rest[pos + delim.len() + 1..];
                 let value: Value = if is_toml {
                     let parsed: toml::Value =
@@ -378,7 +430,7 @@ pub fn split_frontmatter(src: &str) -> Result<(Value, &str)> {
                     Value::Object(_) => value,
                     _ => Value::Object(Default::default()),
                 };
-                return Ok((value, body.trim_start_matches('\n')));
+                return Ok((value, body.trim_start_matches(['\r', '\n'])));
             }
         }
     }
@@ -509,17 +561,41 @@ fn split_date_prefix(stem: &str) -> (Option<&str>, &str) {
     }
 }
 
-fn normalize_url(url: &str) -> String {
+fn normalize_url(url: &str) -> Result<String> {
     let url = url.trim();
+    if url.is_empty() {
+        bail!("url cannot be empty");
+    }
+    if url.contains("://") || url.starts_with("//") {
+        bail!("url must be a site-relative path");
+    }
+    if url.contains(['\\', '?', '#']) {
+        bail!("url contains unsupported characters");
+    }
     let url = if url.starts_with('/') {
         url.to_string()
     } else {
         format!("/{url}")
     };
+    if url
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        bail!("url must not contain . or .. segments");
+    }
     if url.ends_with('/') || url.ends_with(".html") {
-        url
+        Ok(url)
     } else {
-        format!("{url}/")
+        Ok(format!("{url}/"))
+    }
+}
+
+fn url_segment(input: &str) -> String {
+    let slug = slugify(input);
+    if slug.is_empty() {
+        "section".to_string()
+    } else {
+        slug
     }
 }
 
