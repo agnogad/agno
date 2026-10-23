@@ -10,6 +10,14 @@ homepage = "https://github.com/agnogad/agno"
 readme = "README.md"
 keywords = ["static-site", "ssg", "markdown", "blog", "jinja"]
 categories = ["command-line-utilities", "web-programming"]
+include = [
+    "src/**/*.rs",
+    "theme/*",
+    "tests/**/*.rs",
+    "assets/screenshot.png",
+    "README.md",
+    "LICENSE",
+]
 
 [dependencies]
 anyhow = "1"
