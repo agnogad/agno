@@ -6,7 +6,14 @@
   <p class="meta">
     <time datetime="{{ page.datetime }}">{{ page.date }}</time>
     {% for tag in page.tags %} · <a href="/tags/{{ tag|slugify }}/">{{ tag }}</a>{% endfor %}
+    · {{ page.reading_minutes }} min read
   </p>
+  {% endif %}
+  {% if page.toc|length > 1 %}
+  <details class="toc">
+    <summary>Contents</summary>
+    {{ page.toc_html|safe }}
+  </details>
   {% endif %}
   <div class="content">{{ page.content|safe }}</div>
 </article>

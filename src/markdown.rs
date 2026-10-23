@@ -1,23 +1,67 @@
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<Theme> = OnceLock::new();
+/// `find_syntax_by_token` is a linear scan over every bundled grammar, so the
+/// answer is memoised per language: a site with thousands of code blocks would
+/// otherwise pay for that scan on every fence.
+static SYNTAX_CACHE: OnceLock<RwLock<HashMap<String, &'static SyntaxReference>>> = OnceLock::new();
 
-/// Render Markdown to HTML. Returns (html, plain-text summary of the first paragraph).
-pub fn render(input: &str, highlight: bool) -> (String, String) {
+fn syntaxes() -> &'static SyntaxSet {
+    SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn syntax_for(lang: &str) -> &'static SyntaxReference {
+    let cache = SYNTAX_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(found) = cache.read().ok().and_then(|map| map.get(lang).copied()) {
+        return found;
+    }
+    let set = syntaxes();
+    let syntax = set
+        .find_syntax_by_token(lang)
+        .unwrap_or_else(|| set.find_syntax_plain_text());
+    if let Ok(mut map) = cache.write() {
+        map.insert(lang.to_string(), syntax);
+    }
+    syntax
+}
+
+/// One heading in the table of contents.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TocEntry {
+    pub level: u8,
+    pub id: String,
+    pub title: String,
+    pub children: Vec<TocEntry>,
+}
+
+pub struct Rendered {
+    pub html: String,
+    pub summary: String,
+    pub toc: Vec<TocEntry>,
+    /// The table of contents pre-rendered as nested `<ul>` lists.
+    pub toc_html: String,
+}
+
+/// Render Markdown to HTML, collecting the summary and the table of contents.
+pub fn render(input: &str, highlight: bool) -> Rendered {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_FOOTNOTES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_SMART_PUNCTUATION);
+    opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
 
-    let mut events = Vec::new();
+    let mut events = Vec::with_capacity(input.len() / 24 + 8);
+    let mut headings: Vec<(u8, String, String)> = Vec::new();
+    let mut used_ids: HashMap<String, usize> = HashMap::new();
     let mut parser = Parser::new_ext(input, opts);
     while let Some(event) = parser.next() {
         match event {
@@ -39,14 +83,137 @@ pub fn render(input: &str, highlight: bool) -> (String, String) {
                 let highlighted = highlight_code(&code, &lang, highlight);
                 events.push(Event::Html(CowStr::Boxed(highlighted.into_boxed_str())));
             }
+            Event::Start(Tag::Heading {
+                level,
+                id,
+                classes,
+                attrs,
+            }) => {
+                let mut inner = Vec::new();
+                for event in parser.by_ref() {
+                    match event {
+                        Event::End(TagEnd::Heading(_)) => break,
+                        other => inner.push(other),
+                    }
+                }
+                let text = heading_text(&inner);
+                let base = id
+                    .map(|id| id.to_string())
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| crate::content::slugify(&text));
+                let base = if base.is_empty() {
+                    "section".to_string()
+                } else {
+                    base
+                };
+                let unique = unique_id(&mut used_ids, base);
+                headings.push((level as u8, unique.clone(), text));
+                events.push(Event::Start(Tag::Heading {
+                    level,
+                    id: Some(CowStr::Boxed(unique.into_boxed_str())),
+                    classes,
+                    attrs,
+                }));
+                events.extend(inner);
+                events.push(Event::End(TagEnd::Heading(level)));
+            }
             other => events.push(other),
         }
     }
 
     let summary = first_paragraph(&events);
-    let mut out = String::with_capacity(input.len() * 3 / 2);
-    html::push_html(&mut out, events.into_iter());
-    (out, summary)
+    let mut html = String::with_capacity(input.len() * 3 / 2);
+    html::push_html(&mut html, events.into_iter());
+    let toc = build_toc(&headings);
+    let toc_html = render_toc(&toc);
+    Rendered {
+        html,
+        summary,
+        toc,
+        toc_html,
+    }
+}
+
+fn heading_text(events: &[Event<'_>]) -> String {
+    let mut text = String::new();
+    for event in events {
+        match event {
+            Event::Text(t) | Event::Code(t) => text.push_str(t),
+            Event::SoftBreak | Event::HardBreak => text.push(' '),
+            _ => {}
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn unique_id(used: &mut HashMap<String, usize>, base: String) -> String {
+    if !used.contains_key(&base) {
+        used.insert(base.clone(), 0);
+        return base;
+    }
+    let mut counter = used[&base];
+    loop {
+        counter += 1;
+        let candidate = format!("{base}-{counter}");
+        if !used.contains_key(&candidate) {
+            used.insert(base, counter);
+            used.insert(candidate.clone(), 0);
+            return candidate;
+        }
+    }
+}
+
+fn build_toc(flat: &[(u8, String, String)]) -> Vec<TocEntry> {
+    fn children_at<'a>(
+        roots: &'a mut Vec<TocEntry>,
+        path: &[(usize, u8)],
+    ) -> &'a mut Vec<TocEntry> {
+        let mut current = roots;
+        for &(index, _) in path {
+            current = &mut current[index].children;
+        }
+        current
+    }
+
+    let mut roots: Vec<TocEntry> = Vec::new();
+    let mut path: Vec<(usize, u8)> = Vec::new();
+    for (level, id, title) in flat {
+        while let Some(&(_, open_level)) = path.last() {
+            if open_level >= *level {
+                path.pop();
+            } else {
+                break;
+            }
+        }
+        let siblings = children_at(&mut roots, &path);
+        let index = siblings.len();
+        siblings.push(TocEntry {
+            level: *level,
+            id: id.clone(),
+            title: title.clone(),
+            children: Vec::new(),
+        });
+        path.push((index, *level));
+    }
+    roots
+}
+
+fn render_toc(entries: &[TocEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("<ul>");
+    for entry in entries {
+        out.push_str("<li><a href=\"#");
+        out.push_str(&entry.id);
+        out.push_str("\">");
+        out.push_str(&escape_html(&entry.title));
+        out.push_str("</a>");
+        out.push_str(&render_toc(&entry.children));
+        out.push_str("</li>");
+    }
+    out.push_str("</ul>");
+    out
 }
 
 fn first_paragraph(events: &[Event<'_>]) -> String {
@@ -90,10 +257,7 @@ fn highlight_code(code: &str, lang: &str, enabled: bool) -> String {
         return format!("<pre><code{class}>{}</code></pre>", escape_html(code));
     }
 
-    let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
-    let syntax = syntaxes
-        .find_syntax_by_token(&lang)
-        .unwrap_or_else(|| syntaxes.find_syntax_plain_text());
+    let syntax = syntax_for(&lang);
     let theme = THEME.get_or_init(|| {
         ThemeSet::load_defaults()
             .themes
@@ -102,16 +266,21 @@ fn highlight_code(code: &str, lang: &str, enabled: bool) -> String {
             .unwrap_or_default()
     });
     let mut highlighter = HighlightLines::new(syntax, theme);
-    let mut out = String::from("<pre class=\"code\"><code>");
+    let mut out = String::with_capacity(code.len() * 4 + 64);
+    out.push_str("<pre class=\"code\"><code>");
     for line in LinesWithEndings::from(code) {
-        match highlighter.highlight_line(line, syntaxes) {
-            Ok(ranges) => match syntect::html::styled_line_to_highlighted_html(
-                &ranges[..],
-                syntect::html::IncludeBackground::No,
-            ) {
-                Ok(html) => out.push_str(&html),
-                Err(_) => out.push_str(&escape_html(line)),
-            },
+        match highlighter.highlight_line(line, syntaxes()) {
+            Ok(ranges) => {
+                if syntect::html::append_highlighted_html_for_styled_line(
+                    &ranges[..],
+                    syntect::html::IncludeBackground::No,
+                    &mut out,
+                )
+                .is_err()
+                {
+                    out.push_str(&escape_html(line));
+                }
+            }
             Err(_) => out.push_str(&escape_html(line)),
         }
     }
@@ -146,25 +315,57 @@ mod tests {
 
     #[test]
     fn renders_gfm_and_summary() {
-        let (html, summary) = render(
+        let rendered = render(
             "# Hi\n\nFirst **bold** paragraph.\n\n- [x] task\n\n|a|b|\n|-|-|\n|1|2|",
             false,
         );
-        assert!(html.contains("<strong>bold</strong>"));
-        assert!(html.contains("<table>"));
-        assert!(summary.starts_with("First bold paragraph."));
+        assert!(rendered.html.contains("<strong>bold</strong>"));
+        assert!(rendered.html.contains("<table>"));
+        assert!(rendered.summary.starts_with("First bold paragraph."));
     }
 
     #[test]
     fn highlights_fenced_code_when_enabled() {
-        let (html, _) = render("```rust\nfn main() {}\n```", true);
-        assert!(html.contains("<span style="));
-        assert!(!html.contains("```"));
+        let rendered = render("```rust\nfn main() {}\n```", true);
+        assert!(rendered.html.contains("<span style="));
+        assert!(!rendered.html.contains("```"));
     }
 
     #[test]
     fn escapes_html_in_code_when_disabled() {
-        let (html, _) = render("```\n<div>\n```", false);
-        assert!(html.contains("&lt;div&gt;"));
+        let rendered = render("```\n<div>\n```", false);
+        assert!(rendered.html.contains("&lt;div&gt;"));
+    }
+
+    #[test]
+    fn headings_get_stable_unique_anchors() {
+        let rendered = render("# Intro\n\n## Setup\n\n## Setup\n\n### Setup\n", false);
+        assert!(rendered.html.contains("<h1 id=\"intro\">"));
+        assert!(rendered.html.contains("<h2 id=\"setup\">"));
+        assert!(rendered.html.contains("<h2 id=\"setup-1\">"));
+        assert!(rendered.html.contains("<h3 id=\"setup-2\">"));
+    }
+
+    #[test]
+    fn explicit_heading_ids_win() {
+        let rendered = render("## Install {#how}\n", false);
+        assert!(rendered.html.contains("<h2 id=\"how\">"));
+        assert!(rendered.html.contains("Install"));
+    }
+
+    #[test]
+    fn toc_nests_by_heading_level() {
+        let rendered = render("# A\n\n## B\n\n### C\n\n## D\n", false);
+        assert_eq!(rendered.toc.len(), 1);
+        let a = &rendered.toc[0];
+        assert_eq!(a.title, "A");
+        assert_eq!(a.children.len(), 2);
+        assert_eq!(a.children[0].title, "B");
+        assert_eq!(a.children[0].children[0].title, "C");
+        assert_eq!(a.children[1].title, "D");
+        assert_eq!(
+            rendered.toc_html,
+            "<ul><li><a href=\"#a\">A</a><ul><li><a href=\"#b\">B</a><ul><li><a href=\"#c\">C</a></li></ul></li><li><a href=\"#d\">D</a></li></ul></li></ul>"
+        );
     }
 }

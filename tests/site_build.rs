@@ -507,3 +507,27 @@ fn incremental_build_picks_up_template_edits() {
     build_incremental(&root);
     assert!(text(&page).contains("data-revision=\"2\""));
 }
+
+#[test]
+fn headings_get_anchors_and_a_table_of_contents() {
+    let root = fixture("toc");
+    fs::write(
+        root.join("content/blog/toc.md"),
+        "+++\ntitle = \"Toc\"\ndate = 2024-01-01\n+++\n\nIntro.\n\n## One\n\nA.\n\n## Two\n\nB.\n\n### Deep\n\nC.\n",
+    )
+    .unwrap();
+    build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+        },
+    )
+    .unwrap();
+
+    let page = text(&root.join("dist/blog/toc/index.html"));
+    assert!(page.contains("<h2 id=\"one\">"), "{page}");
+    assert!(page.contains("<h3 id=\"deep\">"), "{page}");
+    assert!(page.contains("<a href=\"#two\">Two</a>"), "{page}");
+    assert!(page.contains("min read"), "{page}");
+}

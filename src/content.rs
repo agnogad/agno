@@ -22,6 +22,7 @@ pub struct Page {
     pub date_display: String,
     pub datetime: String,
     pub reading_minutes: u32,
+    pub words: u32,
     pub draft: bool,
     pub description: String,
     pub summary: String,
@@ -179,16 +180,16 @@ fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<Pag
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let (fm, body) = split_frontmatter(&src)
         .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
-    let (html, summary) = markdown::render(body, cfg.highlight);
+    let rendered = markdown::render(body, cfg.highlight);
     let mut page = empty_page(
         field_str(&fm, "title").unwrap_or_else(|| cfg.title.clone()),
         "/".into(),
     );
     page.source = path.clone();
     page.description = field_str(&fm, "description").unwrap_or_else(|| cfg.description.clone());
-    page.summary = field_str(&fm, "summary").unwrap_or(summary);
+    page.summary = field_str(&fm, "summary").unwrap_or(rendered.summary);
     page.extra = fm;
-    page.html = html;
+    page.html = rendered.html;
     Ok(page)
 }
 
@@ -205,13 +206,13 @@ fn load_listing(
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let (fm, body) = split_frontmatter(&src)
         .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
-    let (html, _) = markdown::render(body, cfg.highlight);
+    let rendered = markdown::render(body, cfg.highlight);
     Ok(Listing {
         key: key.to_string(),
         title: field_str(&fm, "title").unwrap_or_else(|| humanize(key)),
         url: url.to_string(),
         description: field_str(&fm, "description").unwrap_or_default(),
-        content: html,
+        content: rendered.html,
     })
 }
 
@@ -350,6 +351,7 @@ fn load_page(
         date_display,
         datetime,
         reading_minutes,
+        words: word_count as u32,
         draft,
         description,
         summary,
@@ -376,6 +378,7 @@ fn empty_page(title: String, url: String) -> Page {
         date_display: String::new(),
         datetime: String::new(),
         reading_minutes: 0,
+        words: 0,
         draft: false,
         description: String::new(),
         summary: String::new(),

@@ -1,7 +1,7 @@
 use crate::cache;
 use crate::config::{Config, MenuItem};
 use crate::content::{self, Content, Page};
-use crate::markdown::{self, escape_html};
+use crate::markdown::{self, TocEntry, escape_html};
 use crate::render::Templates;
 use crate::theme;
 use anyhow::{Context, Result, bail};
@@ -64,6 +64,7 @@ struct PageView<'a> {
     date_display: &'a str,
     datetime: &'a str,
     reading_minutes: u32,
+    words: u32,
     description: &'a str,
     content: &'a str,
     tags: &'a [String],
@@ -71,6 +72,8 @@ struct PageView<'a> {
     slug: &'a str,
     section: Option<&'a str>,
     extra: &'a Json,
+    toc: &'a [TocEntry],
+    toc_html: &'a str,
 }
 
 #[derive(Serialize)]
@@ -363,13 +366,19 @@ fn render_page(
         return Ok(None);
     }
 
-    let (html, auto_summary) = markdown::render(&page.body, cfg.highlight);
+    let rendered = markdown::render(&page.body, cfg.highlight);
     let summary = if page.summary.is_empty() {
-        auto_summary
+        rendered.summary
     } else {
         page.summary.clone()
     };
-    let view = page_view(page, &html, &summary);
+    let view = page_view(
+        page,
+        &rendered.html,
+        &summary,
+        &rendered.toc,
+        &rendered.toc_html,
+    );
     let cards: Vec<CardView> = Vec::new();
     let ctx = context! {
         site => site.clone(),
@@ -658,7 +667,13 @@ fn site_view<'a>(cfg: &Config, content: &'a Content, index: &PageIndex<'a>) -> S
     }
 }
 
-fn page_view<'a>(page: &'a Page, html: &'a str, summary: &'a str) -> PageView<'a> {
+fn page_view<'a>(
+    page: &'a Page,
+    html: &'a str,
+    summary: &'a str,
+    toc: &'a [TocEntry],
+    toc_html: &'a str,
+) -> PageView<'a> {
     PageView {
         title: &page.title,
         url: &page.url,
@@ -666,6 +681,7 @@ fn page_view<'a>(page: &'a Page, html: &'a str, summary: &'a str) -> PageView<'a
         date_display: &page.date_display,
         datetime: &page.datetime,
         reading_minutes: page.reading_minutes,
+        words: page.words,
         description: if page.description.is_empty() {
             summary
         } else {
@@ -677,6 +693,8 @@ fn page_view<'a>(page: &'a Page, html: &'a str, summary: &'a str) -> PageView<'a
         slug: &page.slug,
         section: page.section.as_deref(),
         extra: &page.extra,
+        toc,
+        toc_html,
     }
 }
 
