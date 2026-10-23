@@ -421,3 +421,89 @@ fn a_missing_page_template_is_an_error() {
     .to_string();
     assert!(err.contains("template nope.html not found"), "{err}");
 }
+
+fn build_incremental(root: &Path) -> agno::site::Stats {
+    build(
+        root,
+        &BuildOptions {
+            drafts: false,
+            clean: false,
+        },
+    )
+    .unwrap()
+}
+
+fn modified(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path).unwrap().modified().unwrap()
+}
+
+#[test]
+fn incremental_build_leaves_unchanged_pages_alone() {
+    let root = fixture("incremental-skip");
+    build_incremental(&root);
+
+    let page = root.join("dist/blog/hello/index.html");
+    let before = modified(&page);
+
+    build_incremental(&root);
+    assert_eq!(before, modified(&page), "unchanged page was rewritten");
+
+    fs::write(
+        root.join("content/blog/hello.md"),
+        "+++\ntitle = \"Hello\"\ndate = 2024-05-01\ntags = [\"Rust\", \"Çığır\"]\n+++\n\nSecond **version**.\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let after = text(&page);
+    assert!(after.contains("<strong>version</strong>"), "{after}");
+    assert!(!after.contains("<strong>post</strong>"));
+    assert_ne!(before, modified(&page), "changed page was not rewritten");
+}
+
+#[test]
+fn incremental_build_rerenders_when_the_site_context_changes() {
+    let root = fixture("incremental-site");
+    build_incremental(&root);
+
+    let page = root.join("dist/blog/hello/index.html");
+    assert!(text(&page).contains("<title>Hello · Test Site</title>"));
+
+    fs::write(
+        root.join("agno.toml"),
+        "title = \"Renamed Site\"\nbase_url = \"https://example.com\"\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+    assert!(text(&page).contains("<title>Hello · Renamed Site</title>"));
+}
+
+#[test]
+fn incremental_build_restores_a_deleted_output_file() {
+    let root = fixture("incremental-deleted");
+    build_incremental(&root);
+
+    let page = root.join("dist/blog/hello/index.html");
+    fs::remove_file(&page).unwrap();
+    build_incremental(&root);
+    assert!(page.is_file(), "deleted output was not restored");
+    assert!(text(&page).contains("<strong>post</strong>"));
+}
+
+#[test]
+fn incremental_build_picks_up_template_edits() {
+    let root = fixture("incremental-template");
+    build_incremental(&root);
+
+    let page = root.join("dist/blog/hello/index.html");
+    assert!(!text(&page).contains("data-revision"));
+
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/page.html"),
+        "{% extends \"base.html\" %}{% block content %}<div data-revision=\"2\">{{ page.content|safe }}</div>{% endblock %}",
+    )
+    .unwrap();
+    build_incremental(&root);
+    assert!(text(&page).contains("data-revision=\"2\""));
+}

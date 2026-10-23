@@ -29,7 +29,12 @@ pub struct Page {
     pub categories: Vec<String>,
     pub template: Option<String>,
     pub extra: Value,
+    /// Markdown body, kept until the page is rendered so unchanged pages can
+    /// skip parsing and highlighting entirely.
+    pub body: String,
     pub html: String,
+    /// Fingerprint of the page source; see [`crate::cache`].
+    pub content_key: u64,
     pub section: Option<String>,
 }
 
@@ -111,14 +116,11 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
 
     let loaded: Result<Vec<Option<Page>>> = page_paths
         .par_iter()
-        .map(|path| load_page(&root, path, include_drafts, cfg.highlight, &cfg.language))
+        .map(|path| load_page(&root, path, include_drafts, &cfg.language))
         .collect();
     let mut pages: Vec<Page> = loaded?.into_iter().flatten().collect();
-    pages.sort_by(|a, b| {
-        b.date
-            .cmp(&a.date)
-            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
-    });
+    // Sort keys are computed once per page instead of once per comparison.
+    pages.sort_by_cached_key(|page| (std::cmp::Reverse(page.date), page.title.to_lowercase()));
 
     let home = load_home(cfg, &index_paths)?;
 
@@ -217,7 +219,6 @@ fn load_page(
     root: &Path,
     path: &Path,
     include_drafts: bool,
-    highlight: bool,
     language: &str,
 ) -> Result<Option<Page>> {
     let src =
@@ -326,9 +327,8 @@ fn load_page(
     };
     let title = field_str(&fm, "title").unwrap_or_else(|| humanize(stem_clean));
 
-    let (html, auto_summary) = markdown::render(body, highlight);
-    let summary = field_str(&fm, "summary").unwrap_or(auto_summary);
-    let description = field_str(&fm, "description").unwrap_or_else(|| summary.clone());
+    let summary = field_str(&fm, "summary").unwrap_or_default();
+    let description = field_str(&fm, "description").unwrap_or_default();
 
     let section_source = if is_bundle_index {
         &parent
@@ -357,7 +357,9 @@ fn load_page(
         categories: field_string_list(&fm, "categories"),
         template: field_str(&fm, "template"),
         extra: fm,
-        html,
+        body: body.to_string(),
+        html: String::new(),
+        content_key: crate::cache::fingerprint(0, src.as_bytes()),
         section,
     }))
 }
@@ -381,7 +383,9 @@ fn empty_page(title: String, url: String) -> Page {
         categories: Vec::new(),
         template: None,
         extra: Value::Object(Default::default()),
+        body: String::new(),
         html: String::new(),
+        content_key: 0,
         section: None,
     }
 }
@@ -414,7 +418,8 @@ pub fn split_frontmatter(src: &str) -> Result<(Value, &str)> {
                 .strip_prefix("\r\n")
                 .or_else(|| rest.strip_prefix('\n'))
                 .unwrap_or(rest);
-            if let Some(pos) = rest.find(&format!("\n{delim}")) {
+            let needle = if is_toml { "\n+++" } else { "\n---" };
+            if let Some(pos) = rest.find(needle) {
                 // The delimiter search lands on the LF; a CRLF file leaves a
                 // trailing CR on the frontmatter, which TOML rejects.
                 let front = rest[..pos].trim_end_matches('\r');

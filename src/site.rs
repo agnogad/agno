@@ -1,11 +1,13 @@
+use crate::cache;
 use crate::config::{Config, MenuItem};
 use crate::content::{self, Content, Page};
-use crate::markdown::escape_html;
+use crate::markdown::{self, escape_html};
 use crate::render::Templates;
 use crate::theme;
 use anyhow::{Context, Result, bail};
 use minijinja::context;
 use minijinja::value::Serde;
+use minijinja::{Template, Value};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
@@ -155,6 +157,11 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let templates = Templates::load(&cfg.templates())?;
     let index = PageIndex::new(&content.pages);
     let site = site_view(&cfg, &content, &index);
+    // Serialize the site once: it is identical for every page, and rebuilding
+    // it per page used to cost O(pages x tags) on taxonomy-heavy sites.
+    let site_value: Value = Serde(&site).into();
+    let header = header_hash(&cfg, &site)?;
+    let fingerprints = cache::Fingerprints::load(root, header);
     let output = cfg.output();
     if opts.clean && output.exists() {
         remove_all(&output).with_context(|| format!("cleaning {}", output.display()))?;
@@ -234,17 +241,56 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     }
 
     let phase = Instant::now();
-    content
+    let default_name = templates
+        .first(&["page.html"])
+        .context("no template for pages: page.html is missing")?;
+    let default_page = templates.get(&default_name)?;
+    let fresh: Vec<Option<String>> = content
         .pages
         .par_iter()
-        .map(|page| render_page(&cfg, &templates, &site, page))
+        .map(|page| {
+            render_page(
+                &cfg,
+                &templates,
+                &site_value,
+                &fingerprints,
+                &default_name,
+                &default_page,
+                page,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let ms_pages = phase.elapsed().as_millis();
 
     let phase = Instant::now();
-    lists.par_iter().try_for_each(|(list, candidates)| {
-        render_list(&cfg, &templates, &site, list, candidates)
-    })?;
+    let mut list_names: Vec<String> = Vec::with_capacity(lists.len());
+    for (list, candidates) in &lists {
+        list_names.push(
+            templates.first(candidates).with_context(|| {
+                format!("no template found for {} among {candidates:?}", list.url)
+            })?,
+        );
+    }
+    let list_keys: Vec<u64> = lists
+        .iter()
+        .zip(&list_names)
+        .map(|((list, _), name)| list_key(header, name, list))
+        .collect();
+    let list_rendered: Vec<bool> = lists
+        .par_iter()
+        .zip(list_names.par_iter())
+        .zip(list_keys.par_iter())
+        .map(|((list, name), key)| -> Result<bool> {
+            let (list, _) = list;
+            if fingerprints.summary(list.url, *key).is_some()
+                && output_path(&cfg, list.url).is_file()
+            {
+                return Ok(false);
+            }
+            render_list(&cfg, &templates, &site_value, list, name)?;
+            Ok(true)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     write_text(&output, "rss.xml", &rss(&cfg, &content.pages))?;
     write_text(&output, "sitemap.xml", &sitemap(&cfg, &content))?;
@@ -268,6 +314,26 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
 
     write_manifest(root, &output, &expected)?;
 
+    // Only rewrite the fingerprint file when the page or list set changed.
+    let expected_entries = content.pages.len() + lists.len();
+    if fresh.iter().any(Option::is_some)
+        || list_rendered.iter().any(|rendered| *rendered)
+        || fingerprints.len() != expected_entries
+    {
+        let pages = content.pages.iter().zip(fresh.iter()).map(|(page, fresh)| {
+            let summary = fresh
+                .as_deref()
+                .or_else(|| fingerprints.summary(&page.url, page.content_key))
+                .unwrap_or(&page.summary);
+            (page.url.as_str(), page.content_key, summary)
+        });
+        let lists = lists
+            .iter()
+            .zip(&list_keys)
+            .map(|((list, _), key)| (list.url, *key, ""));
+        fingerprints.save(root, pages.chain(lists))?;
+    }
+
     Ok(Stats {
         pages: content.pages.len(),
         ms_total: started.elapsed().as_millis(),
@@ -278,60 +344,120 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_page(
     cfg: &Config,
     templates: &Templates,
-    site: &SiteView<'_>,
+    site: &Value,
+    fingerprints: &cache::Fingerprints,
+    default_name: &str,
+    default_template: &Template<'_, '_>,
     page: &Page,
-) -> Result<()> {
-    let name = match page.template.as_deref() {
-        Some(name) if templates.has(name) => name.to_string(),
-        Some(name) => bail!("template {name} not found for page {}", page.url),
-        None => templates
-            .first(&["page.html"])
-            .with_context(|| format!("no template for page {}", page.url))?,
+) -> Result<Option<String>> {
+    // The rendered file in `dist/` doubles as the cache: when the page source,
+    // the templates and the site-wide context are unchanged, skip Markdown,
+    // highlighting, templating and the write entirely.
+    if fingerprints.summary(&page.url, page.content_key).is_some()
+        && output_path(cfg, &page.url).is_file()
+    {
+        return Ok(None);
+    }
+
+    let (html, auto_summary) = markdown::render(&page.body, cfg.highlight);
+    let summary = if page.summary.is_empty() {
+        auto_summary
+    } else {
+        page.summary.clone()
     };
-    let view = page_view(page);
+    let view = page_view(page, &html, &summary);
     let cards: Vec<CardView> = Vec::new();
     let ctx = context! {
-        site => Serde(site),
+        site => site.clone(),
         page => Serde(&view),
         pages => Serde(&cards),
     };
-    let html = templates
-        .render(&name, ctx)
-        .with_context(|| format!("rendering page {}", page.url))?;
-    write_output(cfg, &page.url, &html)
+    let rendered = match page.template.as_deref() {
+        Some(name) if name != default_name => templates
+            .get(name)
+            .with_context(|| format!("template {name} not found for page {}", page.url))?
+            .render(ctx)
+            .with_context(|| format!("rendering page {}", page.url))?,
+        _ => default_template
+            .render(ctx)
+            .with_context(|| format!("rendering page {}", page.url))?,
+    };
+    write_output(cfg, &page.url, &rendered)?;
+    Ok(Some(summary))
 }
 
 fn render_list(
     cfg: &Config,
     templates: &Templates,
-    site: &SiteView<'_>,
+    site: &Value,
     list: &ListView<'_>,
-    candidates: &[&str],
+    name: &str,
 ) -> Result<()> {
     let url = list.url;
-    let name = templates
-        .first(candidates)
-        .with_context(|| format!("no template found for {url} among {candidates:?}"))?;
     let ctx = context! {
-        site => Serde(site),
+        site => site.clone(),
         page => Serde(list),
         pages => Serde(&list.pages),
     };
     let html = templates
-        .render(&name, ctx)
+        .render(name, ctx)
         .with_context(|| format!("rendering list {url}"))?;
     write_output(cfg, url, &html)
+}
+
+/// Hash everything a list page is rendered from. Lists are re-rendered only
+/// when one of their cards, their own metadata, or the site context changes.
+fn list_key(header: u64, template: &str, list: &ListView<'_>) -> u64 {
+    let mut hash = cache::fingerprint(header, template.as_bytes());
+    hash = cache::fingerprint(hash, list.url.as_bytes());
+    hash = cache::fingerprint(hash, list.title.as_bytes());
+    hash = cache::fingerprint(hash, list.description.as_bytes());
+    hash = cache::fingerprint(hash, list.content.as_bytes());
+    for card in &list.pages {
+        hash = cache::fingerprint(hash, card.url.as_bytes());
+        hash = cache::fingerprint(hash, card.title.as_bytes());
+        hash = cache::fingerprint(hash, card.date.as_bytes());
+        hash = cache::fingerprint(hash, card.date_display.as_bytes());
+        hash = cache::fingerprint(hash, card.datetime.as_bytes());
+        hash = cache::fingerprint(hash, card.summary.as_bytes());
+        hash = cache::fingerprint(hash, card.section.unwrap_or_default().as_bytes());
+        hash = cache::fingerprint(hash, &card.reading_minutes.to_le_bytes());
+        for tag in card.tags {
+            hash = cache::fingerprint(hash, tag.as_bytes());
+        }
+    }
+    hash
 }
 
 fn write_output(cfg: &Config, url: &str, html: &str) -> Result<()> {
     let path = output_path(cfg, url);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        ensure_dir(parent)?;
     }
     fs::write(&path, html).with_context(|| format!("writing {}", path.display()))
+}
+
+thread_local! {
+    /// Directories this worker already created. Avoids one `mkdir` syscall per
+    /// page while still keeping writes independent across threads.
+    static KNOWN_DIRS: std::cell::RefCell<HashSet<PathBuf>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+fn ensure_dir(dir: &Path) -> Result<()> {
+    let known = KNOWN_DIRS.with(|dirs| dirs.borrow().contains(dir));
+    if known {
+        return Ok(());
+    }
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    KNOWN_DIRS.with(|dirs| {
+        dirs.borrow_mut().insert(dir.to_path_buf());
+    });
+    Ok(())
 }
 
 fn output_path(cfg: &Config, url: &str) -> PathBuf {
@@ -399,6 +525,43 @@ fn validate_urls(cfg: &Config, content: &Content) -> Result<()> {
 
 fn manifest_path(root: &Path) -> PathBuf {
     root.join(".agno-cache").join("outputs.json")
+}
+
+/// Everything a page render depends on except the page source itself.
+fn header_hash(cfg: &Config, site: &SiteView<'_>) -> Result<u64> {
+    let site_json = serde_json::to_string(site).context("serializing site context")?;
+    Ok(cache::combine(&[
+        cache::fingerprint(0, env!("CARGO_PKG_VERSION").as_bytes()),
+        cache::fingerprint(0, if cfg.highlight { b"on" } else { b"off" }),
+        cache::fingerprint(0, cfg.language.as_bytes()),
+        cache::fingerprint(0, site_json.as_bytes()),
+        templates_fingerprint(&cfg.templates()),
+    ]))
+}
+
+fn templates_fingerprint(dir: &Path) -> u64 {
+    let mut hash = cache::fingerprint(0, b"agno-templates");
+    for (name, source) in theme::TEMPLATES {
+        hash = cache::fingerprint(hash, name.as_bytes());
+        hash = cache::fingerprint(hash, source.as_bytes());
+    }
+    if !dir.is_dir() {
+        return hash;
+    }
+    let mut files: Vec<PathBuf> = WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .collect();
+    files.sort();
+    for file in files {
+        hash = cache::fingerprint(hash, file.to_string_lossy().as_bytes());
+        if let Ok(bytes) = fs::read(&file) {
+            hash = cache::fingerprint(hash, &bytes);
+        }
+    }
+    hash
 }
 
 fn read_manifest(root: &Path) -> Option<Manifest> {
@@ -495,7 +658,7 @@ fn site_view<'a>(cfg: &Config, content: &'a Content, index: &PageIndex<'a>) -> S
     }
 }
 
-fn page_view(page: &Page) -> PageView<'_> {
+fn page_view<'a>(page: &'a Page, html: &'a str, summary: &'a str) -> PageView<'a> {
     PageView {
         title: &page.title,
         url: &page.url,
@@ -503,8 +666,12 @@ fn page_view(page: &Page) -> PageView<'_> {
         date_display: &page.date_display,
         datetime: &page.datetime,
         reading_minutes: page.reading_minutes,
-        description: page.plain_description(),
-        content: &page.html,
+        description: if page.description.is_empty() {
+            summary
+        } else {
+            &page.description
+        },
+        content: html,
         tags: &page.tags,
         categories: &page.categories,
         slug: &page.slug,

@@ -34,8 +34,11 @@ enum Command {
         /// Print per-phase timings
         #[arg(long)]
         stats: bool,
-        /// Keep existing output and remove only stale generated files
+        /// Delete the output directory before building
         #[arg(long)]
+        clean: bool,
+        /// Deprecated: builds are incremental by default
+        #[arg(long, hide = true)]
         no_clean: bool,
         /// Site root (defaults to the current directory)
         #[arg(short, long)]
@@ -73,17 +76,12 @@ fn main() -> Result<()> {
         Command::Build {
             drafts,
             stats,
-            no_clean,
+            clean,
+            no_clean: _,
             root,
         } => {
             let root = root.unwrap_or_else(|| PathBuf::from("."));
-            let report = site::build(
-                &root,
-                &BuildOptions {
-                    drafts,
-                    clean: !no_clean,
-                },
-            )?;
+            let report = site::build(&root, &BuildOptions { drafts, clean })?;
             if stats {
                 println!(
                     "  content {} ms · pages {} ms · lists+feeds {} ms",

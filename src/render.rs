@@ -1,7 +1,7 @@
 use crate::content::slugify;
 use crate::theme;
 use anyhow::{Context, Result};
-use minijinja::{AutoEscape, Environment, Value, path_loader};
+use minijinja::{AutoEscape, Environment, Template, Value, path_loader};
 use std::path::Path;
 
 pub struct Templates {
@@ -39,11 +39,15 @@ impl Templates {
             .map(|name| name.to_string())
     }
 
-    pub fn render(&self, name: &str, context: Value) -> Result<String> {
-        let template = self
-            .env
+    /// Resolve a template once so callers can render it many times without
+    /// paying for a name lookup (and its lock) on every page.
+    pub fn get(&self, name: &str) -> Result<Template<'_, '_>> {
+        self.env
             .get_template(name)
-            .with_context(|| format!("template {name} not found"))?;
-        Ok(template.render(context)?)
+            .with_context(|| format!("template {name} not found"))
+    }
+
+    pub fn render(&self, name: &str, context: Value) -> Result<String> {
+        Ok(self.get(name)?.render(context)?)
     }
 }
