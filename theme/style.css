@@ -106,6 +106,19 @@ h1 { font-size: 1.9rem; margin: 0 0 1rem; }
 .toc li { margin: 0.15rem 0; }
 .toc a { text-decoration: none; }
 
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.95rem;
+}
+.pagination a { text-decoration: none; }
+.pagination-info { color: var(--muted); font-variant-numeric: tabular-nums; }
+
 footer {
   margin-top: 4rem;
   padding-top: 1rem;

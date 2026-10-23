@@ -12,4 +12,11 @@
   </li>
   {% endfor %}
 </ul>
+{% if page.paginator %}
+<nav class="pagination">
+  {% if page.paginator.prev_url %}<a rel="prev" href="{{ page.paginator.prev_url }}">← Newer</a>{% else %}<span></span>{% endif %}
+  <span class="pagination-info">{{ page.paginator.current }} / {{ page.paginator.total }}</span>
+  {% if page.paginator.next_url %}<a rel="next" href="{{ page.paginator.next_url }}">Older →</a>{% else %}<span></span>{% endif %}
+</nav>
+{% endif %}
 {% endblock %}

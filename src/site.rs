@@ -76,7 +76,7 @@ struct PageView<'a> {
     toc_html: &'a str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct CardView<'a> {
     title: &'a str,
     url: &'a str,
@@ -102,10 +102,39 @@ struct SearchEntry<'a> {
 #[derive(Serialize)]
 struct ListView<'a> {
     title: &'a str,
-    url: &'a str,
+    url: String,
     description: &'a str,
     content: &'a str,
     pages: Vec<CardView<'a>>,
+    paginator: Option<PagerView>,
+}
+
+#[derive(Serialize, Clone)]
+struct PagerView {
+    current: usize,
+    total: usize,
+    page_size: usize,
+    item_count: usize,
+    prev_url: Option<String>,
+    next_url: Option<String>,
+    first_url: String,
+    last_url: String,
+    links: Vec<PagerLink>,
+}
+
+#[derive(Serialize, Clone)]
+struct PagerLink {
+    number: usize,
+    url: String,
+    current: bool,
+}
+
+/// Page 1 lives at the section URL; later pages at `/section/page/N/`.
+fn page_url(section_url: &str, number: usize) -> String {
+    if number <= 1 {
+        return section_url.to_string();
+    }
+    format!("{}/page/{number}/", section_url.trim_end_matches('/'))
 }
 
 struct PageIndex<'a> {
@@ -180,38 +209,86 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     lists.push((
         ListView {
             title: &content.home.title,
-            url: "/",
+            url: "/".to_string(),
             description: &content.home.description,
             content: &content.home.html,
             pages: content.pages.iter().map(card).collect(),
+            paginator: None,
         },
         &["index.html"],
     ));
     for section in &content.sections {
-        lists.push((
-            ListView {
-                title: &section.title,
-                url: &section.url,
-                description: &section.description,
-                content: &section.content,
-                pages: index
-                    .section(&section.key)
-                    .iter()
-                    .copied()
-                    .map(card)
-                    .collect(),
-            },
-            &["section.html"],
-        ));
+        let all: Vec<CardView> = index
+            .section(&section.key)
+            .iter()
+            .copied()
+            .map(card)
+            .collect();
+        let page_size = section.paginate_by.unwrap_or(0);
+        if page_size == 0 || all.len() <= page_size {
+            lists.push((
+                ListView {
+                    title: &section.title,
+                    url: section.url.clone(),
+                    description: &section.description,
+                    content: &section.content,
+                    pages: all,
+                    paginator: None,
+                },
+                &["section.html"],
+            ));
+            continue;
+        }
+        let total = all.len().div_ceil(page_size);
+        let links: Vec<PagerLink> = (1..=total)
+            .map(|number| PagerLink {
+                number,
+                url: page_url(&section.url, number),
+                current: false,
+            })
+            .collect();
+        for (index, chunk) in all.chunks(page_size).enumerate() {
+            let current = index + 1;
+            let url = page_url(&section.url, current);
+            if current > 1 && expected.contains(&output_rel(&url)) {
+                bail!("paginated URL {url} collides with another page or section");
+            }
+            let mut links = links.clone();
+            for link in &mut links {
+                link.current = link.number == current;
+            }
+            lists.push((
+                ListView {
+                    title: &section.title,
+                    url,
+                    description: &section.description,
+                    content: &section.content,
+                    pages: chunk.to_vec(),
+                    paginator: Some(PagerView {
+                        current,
+                        total,
+                        page_size,
+                        item_count: all.len(),
+                        prev_url: (current > 1).then(|| page_url(&section.url, current - 1)),
+                        next_url: (current < total).then(|| page_url(&section.url, current + 1)),
+                        first_url: section.url.clone(),
+                        last_url: page_url(&section.url, total),
+                        links,
+                    }),
+                },
+                &["section.html"],
+            ));
+        }
     }
     for tag in &content.tags {
         lists.push((
             ListView {
                 title: &tag.title,
-                url: &tag.url,
+                url: tag.url.clone(),
                 description: "",
                 content: "",
                 pages: index.tag(&tag.key).iter().copied().map(card).collect(),
+                paginator: None,
             },
             &["tag.html", "section.html"],
         ));
@@ -219,14 +296,15 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     lists.push((
         ListView {
             title: "404",
-            url: "/404.html",
+            url: "/404.html".to_string(),
             description: "",
             content: "",
             pages: Vec::new(),
+            paginator: None,
         },
         &["404.html"],
     ));
-    expected.extend(lists.iter().map(|(list, _)| output_rel(list.url)));
+    expected.extend(lists.iter().map(|(list, _)| output_rel(&list.url)));
     expected.insert("rss.xml".into());
     expected.insert("sitemap.xml".into());
     expected.insert("robots.txt".into());
@@ -285,8 +363,8 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         .zip(list_keys.par_iter())
         .map(|((list, name), key)| -> Result<bool> {
             let (list, _) = list;
-            if fingerprints.summary(list.url, *key).is_some()
-                && output_path(&cfg, list.url).is_file()
+            if fingerprints.summary(&list.url, *key).is_some()
+                && output_path(&cfg, &list.url).is_file()
             {
                 return Ok(false);
             }
@@ -333,7 +411,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         let lists = lists
             .iter()
             .zip(&list_keys)
-            .map(|((list, _), key)| (list.url, *key, ""));
+            .map(|((list, _), key)| (list.url.as_str(), *key, ""));
         fingerprints.save(root, pages.chain(lists))?;
     }
 
@@ -406,7 +484,7 @@ fn render_list(
     list: &ListView<'_>,
     name: &str,
 ) -> Result<()> {
-    let url = list.url;
+    let url = &list.url;
     let ctx = context! {
         site => site.clone(),
         page => Serde(list),
@@ -437,6 +515,24 @@ fn list_key(header: u64, template: &str, list: &ListView<'_>) -> u64 {
         hash = cache::fingerprint(hash, &card.reading_minutes.to_le_bytes());
         for tag in card.tags {
             hash = cache::fingerprint(hash, tag.as_bytes());
+        }
+    }
+    if let Some(pager) = &list.paginator {
+        for number in [
+            pager.current,
+            pager.total,
+            pager.page_size,
+            pager.item_count,
+        ] {
+            hash = cache::fingerprint(hash, &number.to_le_bytes());
+        }
+        for url in [
+            pager.prev_url.as_deref(),
+            pager.next_url.as_deref(),
+            Some(pager.first_url.as_str()),
+            Some(pager.last_url.as_str()),
+        ] {
+            hash = cache::fingerprint(hash, url.unwrap_or_default().as_bytes());
         }
     }
     hash

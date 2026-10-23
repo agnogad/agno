@@ -46,6 +46,8 @@ pub struct Listing {
     pub url: String,
     pub description: String,
     pub content: String,
+    /// Split this section's pages into `/section/page/N/` chunks of this size.
+    pub paginate_by: Option<usize>,
 }
 
 pub struct Content {
@@ -79,6 +81,7 @@ impl Listing {
             url: url.to_string(),
             description: String::new(),
             content: String::new(),
+            paginate_by: None,
         }
     }
 }
@@ -159,6 +162,7 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
             url: format!("/tags/{slug}/"),
             description: String::new(),
             content: String::new(),
+            paginate_by: None,
         })
         .collect();
 
@@ -213,6 +217,7 @@ fn load_listing(
         url: url.to_string(),
         description: field_str(&fm, "description").unwrap_or_default(),
         content: rendered.html,
+        paginate_by: field_usize(&fm, "paginate_by").filter(|size| *size > 0),
     })
 }
 
@@ -481,6 +486,14 @@ fn field_bool(fm: &Value, key: &str) -> Option<bool> {
     match field(fm, key)? {
         Value::Bool(b) => b.to_string().parse().ok(),
         Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn field_usize(fm: &Value, key: &str) -> Option<usize> {
+    match field(fm, key)? {
+        Value::Number(n) => n.as_u64().map(|n| n as usize),
+        Value::String(s) => s.trim().parse().ok(),
         _ => None,
     }
 }

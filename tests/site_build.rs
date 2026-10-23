@@ -531,3 +531,49 @@ fn headings_get_anchors_and_a_table_of_contents() {
     assert!(page.contains("<a href=\"#two\">Two</a>"), "{page}");
     assert!(page.contains("min read"), "{page}");
 }
+
+#[test]
+fn sections_can_paginate_their_pages() {
+    let root = fixture("pagination");
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\npaginate_by = 2\n+++\n",
+    )
+    .unwrap();
+    for i in 0..5 {
+        fs::write(
+            root.join(format!("content/blog/p{i}.md")),
+            format!(
+                "+++\ntitle = \"Post {i}\"\ndate = 2024-01-0{} \n+++\n\nBody {i}.\n",
+                i + 1
+            ),
+        )
+        .unwrap();
+    }
+
+    build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+        },
+    )
+    .unwrap();
+
+    let first = text(&root.join("dist/blog/index.html"));
+    assert_eq!(first.matches("class=\"post-list\"").count(), 1);
+    assert!(first.contains("Post 4"), "newest post first: {first}");
+    assert!(first.contains("1 / 3"), "{first}");
+    assert!(first.contains("rel=\"next\""), "{first}");
+    assert!(!first.contains("rel=\"prev\""), "{first}");
+
+    let second = text(&root.join("dist/blog/page/2/index.html"));
+    assert!(second.contains("2 / 3"));
+    assert!(second.contains("rel=\"prev\""));
+    assert!(second.contains("rel=\"next\""));
+
+    let third = text(&root.join("dist/blog/page/3/index.html"));
+    assert!(third.contains("3 / 3"));
+    assert!(!third.contains("Older →"), "last page has no next link");
+    assert!(!root.join("dist/blog/page/4").exists());
+}
