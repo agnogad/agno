@@ -7,7 +7,7 @@
 **A fast, content-first static site generator written in Rust.**
 
 agno turns Markdown and Jinja-style templates into a static site from a single
-3.9 MB binary — no Node.js, no bundler, and no plugin runtime. It is built for
+4.2 MB binary — no Node.js, no bundler, and no plugin runtime. It is built for
 sites where the content is the product: blogs, documentation, notes, and small
 marketing pages.
 
@@ -40,7 +40,7 @@ marketing pages.
 - **Incremental by default.** A build remembers what it rendered, so a rebuild
   only touches the pages whose source, templates or site context changed:
   1,000 posts rebuild in ~27 ms, and editing one post costs ~40 ms.
-- **One static binary.** The release binary is 3.9 MB and has no runtime
+- **One static binary.** The release binary is 4.2 MB and has no runtime
   dependencies. No `node_modules`, no language runtime, no service to install.
 - **Small, understandable surface.** A focused feature set instead of a plugin
   ecosystem, a bundler, and a JavaScript toolchain.
