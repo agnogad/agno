@@ -1,6 +1,7 @@
 # agno
 
 [![CI](https://github.com/agnogad/agno/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agnogad/agno/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/agno.svg)](https://crates.io/crates/agno)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
@@ -65,9 +66,16 @@ faster than Hugo** and **16.7–185× faster than Astro** on cold builds. See
   static at runtime.
 
 > [!NOTE]
-> agno is at **0.3.0** and is not on [crates.io](https://crates.io/crates/agno)
-> yet. Prebuilt binaries are planned for GitHub Releases; today, install from
-> Git or build from source.
+> agno **0.3.1** is published on
+> [crates.io](https://crates.io/crates/agno). Prebuilt binaries are planned for
+> GitHub Releases; until then, install from crates.io, from Git, or build from
+> source.
+
+### Install from crates.io
+
+```sh
+cargo install agno
+```
 
 ### Install from GitHub
 
@@ -87,7 +95,7 @@ cargo install --path .
 
 ```sh
 agno --version
-# agno 0.3.0
+# agno 0.3.1
 ```
 
 ## Quick start
@@ -315,7 +323,7 @@ pages/s for Hugo. The full matrix, raw samples, and reproduction steps are in
 [`bench/REPORT.md`](bench/REPORT.md) and [`bench/README.md`](bench/README.md).
 
 > **Report versions:** agno 0.1.0, Hugo 0.168.0, Astro 7.4.2. The current
-> release is 0.3.0; rerun [`bench/suite.py`](bench/suite.py) to measure your own
+> release is 0.3.1; rerun [`bench/suite.py`](bench/suite.py) to measure your own
 > machine.
 
 ### Search index cost (agno 0.2.0)
