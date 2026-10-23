@@ -1,7 +1,7 @@
 use crate::cache;
 use crate::config::{Config, MenuItem};
-use crate::content::{self, Content, Page};
-use crate::markdown::{self, TocEntry, escape_html};
+use crate::content::{self, Content, Listing, Page};
+use crate::markdown::{self, TocEntry, escape_html, push_escaped};
 use crate::render::Templates;
 use crate::theme;
 use anyhow::{Context, Result, bail};
@@ -205,130 +205,17 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     }
     fs::create_dir_all(&output).with_context(|| format!("creating {}", output.display()))?;
 
-    let mut expected = HashSet::new();
-    for page in &content.pages {
-        expected.insert(output_rel(&page.url));
-        for alias in &page.aliases {
-            expected.insert(output_rel(alias));
-        }
-    }
-
-    let mut lists: Vec<(ListView<'_>, &[&str])> = Vec::new();
-    lists.push((
-        ListView {
-            title: &content.home.title,
-            url: "/".to_string(),
-            description: &content.home.description,
-            content: &content.home.html,
-            pages: content.pages.iter().map(card).collect(),
-            paginator: None,
-        },
-        &["index.html"],
-    ));
-    for section in &content.sections {
-        let all: Vec<CardView> = index
-            .section(&section.key)
-            .iter()
-            .copied()
-            .map(card)
-            .collect();
-        let page_size = section.paginate_by.unwrap_or(0);
-        if page_size == 0 || all.len() <= page_size {
-            lists.push((
-                ListView {
-                    title: &section.title,
-                    url: section.url.clone(),
-                    description: &section.description,
-                    content: &section.content,
-                    pages: all,
-                    paginator: None,
-                },
-                &["section.html"],
-            ));
-            continue;
-        }
-        let total = all.len().div_ceil(page_size);
-        let links: Vec<PagerLink> = (1..=total)
-            .map(|number| PagerLink {
-                number,
-                url: page_url(&section.url, number),
-                current: false,
-            })
-            .collect();
-        for (index, chunk) in all.chunks(page_size).enumerate() {
-            let current = index + 1;
-            let url = page_url(&section.url, current);
-            if current > 1 && expected.contains(&output_rel(&url)) {
-                bail!("paginated URL {url} collides with another page or section");
-            }
-            let mut links = links.clone();
-            for link in &mut links {
-                link.current = link.number == current;
-            }
-            lists.push((
-                ListView {
-                    title: &section.title,
-                    url,
-                    description: &section.description,
-                    content: &section.content,
-                    pages: chunk.to_vec(),
-                    paginator: Some(PagerView {
-                        current,
-                        total,
-                        page_size,
-                        item_count: all.len(),
-                        prev_url: (current > 1).then(|| page_url(&section.url, current - 1)),
-                        next_url: (current < total).then(|| page_url(&section.url, current + 1)),
-                        first_url: section.url.clone(),
-                        last_url: page_url(&section.url, total),
-                        links,
-                    }),
-                },
-                &["section.html"],
-            ));
-        }
-    }
-    for tag in &content.tags {
-        lists.push((
-            ListView {
-                title: &tag.title,
-                url: tag.url.clone(),
-                description: "",
-                content: "",
-                pages: index.tag(&tag.key).iter().copied().map(card).collect(),
-                paginator: None,
-            },
-            &["tag.html", "section.html"],
-        ));
-    }
-    lists.push((
-        ListView {
-            title: "404",
-            url: "/404.html".to_string(),
-            description: "",
-            content: "",
-            pages: Vec::new(),
-            paginator: None,
-        },
-        &["404.html"],
-    ));
-    expected.extend(lists.iter().map(|(list, _)| output_rel(&list.url)));
-    expected.insert("rss.xml".into());
-    expected.insert("sitemap.xml".into());
-    expected.insert("robots.txt".into());
-    expected.insert("style.css".into());
-    if cfg.search_index {
-        expected.insert("search-index.json".into());
-    }
+    // Stale output is removed before anything is written, so a URL that
+    // changed shape (file to directory, or back) can be recreated cleanly.
     let static_files = static_files(&cfg)?;
     let static_paths = static_rels(&cfg, &static_files)?;
     let has_static_style = static_paths.iter().any(|path| path == "style.css");
-    expected.extend(static_paths);
-
+    let mut expected = expected_outputs(&cfg, &content, &static_paths)?;
     if !opts.clean {
         remove_stale(root, &output, &expected)?;
     }
 
+    // ---- pages ----
     let phase = Instant::now();
     let default_name = templates
         .first(&["page.html"])
@@ -355,6 +242,24 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         .pages
         .par_iter()
         .try_for_each(|page| write_aliases(&cfg, page))?;
+
+    // A page's summary comes from its own Markdown, so it is only known once
+    // the page has rendered (or read back from the fingerprint cache).
+    let summaries: HashMap<&str, &str> = content
+        .pages
+        .iter()
+        .zip(&fresh)
+        .map(|(page, fresh)| {
+            let summary = fresh
+                .as_deref()
+                .or_else(|| fingerprints.summary(&page.url, page.content_key))
+                .unwrap_or(&page.summary);
+            (page.url.as_str(), summary)
+        })
+        .collect();
+
+    let lists = build_lists(&content, &index, &summaries)?;
+    expected.extend(lists.iter().map(|(list, _)| output_rel(&list.url)));
 
     let phase = Instant::now();
     let mut list_names: Vec<String> = Vec::with_capacity(lists.len());
@@ -386,10 +291,10 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    write_text(&output, "rss.xml", &rss(&cfg, &content.pages))?;
+    write_text(&output, "rss.xml", &rss(&cfg, &content.pages, &summaries))?;
     write_text(&output, "sitemap.xml", &sitemap(&cfg, &content))?;
     if cfg.search_index {
-        let index = search_index(&content.pages)?;
+        let index = search_index(&content.pages, &summaries)?;
         write_text(&output, "search-index.json", &index)?;
     }
     write_text(
@@ -436,6 +341,174 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         ms_rest: phase.elapsed().as_millis(),
         output,
     })
+}
+
+/// Every path the build is expected to write, computed from metadata only so
+/// stale output can be removed before any page is rendered.
+fn expected_outputs(
+    cfg: &Config,
+    content: &Content,
+    static_paths: &[String],
+) -> Result<HashSet<String>> {
+    let mut expected = HashSet::new();
+    for page in &content.pages {
+        expected.insert(output_rel(&page.url));
+        for alias in &page.aliases {
+            expected.insert(output_rel(alias));
+        }
+    }
+    expected.insert(output_rel("/"));
+    expected.insert(output_rel("/404.html"));
+
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for page in &content.pages {
+        if let Some(section) = page.section.as_deref() {
+            *counts.entry(section).or_default() += 1;
+        }
+    }
+    for section in &content.sections {
+        expected.insert(output_rel(&section.url));
+        let count = counts.get(section.key.as_str()).copied().unwrap_or(0);
+        for number in 2..=section_page_count(section, count) {
+            let url = page_url(&section.url, number);
+            if !expected.insert(output_rel(&url)) {
+                bail!("paginated URL {url} collides with another page or section");
+            }
+        }
+    }
+    for tag in &content.tags {
+        expected.insert(output_rel(&tag.url));
+    }
+
+    expected.insert("rss.xml".into());
+    expected.insert("sitemap.xml".into());
+    expected.insert("robots.txt".into());
+    expected.insert("style.css".into());
+    if cfg.search_index {
+        expected.insert("search-index.json".into());
+    }
+    expected.extend(static_paths.iter().cloned());
+    Ok(expected)
+}
+
+fn section_page_count(section: &Listing, count: usize) -> usize {
+    match section.paginate_by {
+        Some(size) if size > 0 && count > size => count.div_ceil(size),
+        _ => 1,
+    }
+}
+
+fn build_lists<'a>(
+    content: &'a Content,
+    index: &PageIndex<'a>,
+    summaries: &HashMap<&'a str, &'a str>,
+) -> Result<Vec<(ListView<'a>, &'static [&'static str])>> {
+    let mut lists: Vec<(ListView<'a>, &'static [&'static str])> = Vec::new();
+    lists.push((
+        ListView {
+            title: &content.home.title,
+            url: "/".to_string(),
+            description: &content.home.description,
+            content: &content.home.html,
+            pages: content
+                .pages
+                .iter()
+                .map(|page| card(page, summaries))
+                .collect(),
+            paginator: None,
+        },
+        &["index.html"],
+    ));
+    for section in &content.sections {
+        let all: Vec<CardView> = index
+            .section(&section.key)
+            .iter()
+            .copied()
+            .map(|page| card(page, summaries))
+            .collect();
+        let page_size = section.paginate_by.unwrap_or(0);
+        let total = section_page_count(section, all.len());
+        if total <= 1 {
+            lists.push((
+                ListView {
+                    title: &section.title,
+                    url: section.url.clone(),
+                    description: &section.description,
+                    content: &section.content,
+                    pages: all,
+                    paginator: None,
+                },
+                &["section.html"],
+            ));
+            continue;
+        }
+        let links: Vec<PagerLink> = (1..=total)
+            .map(|number| PagerLink {
+                number,
+                url: page_url(&section.url, number),
+                current: false,
+            })
+            .collect();
+        for (index, chunk) in all.chunks(page_size).enumerate() {
+            let current = index + 1;
+            let url = page_url(&section.url, current);
+            let mut links = links.clone();
+            for link in &mut links {
+                link.current = link.number == current;
+            }
+            lists.push((
+                ListView {
+                    title: &section.title,
+                    url,
+                    description: &section.description,
+                    content: &section.content,
+                    pages: chunk.to_vec(),
+                    paginator: Some(PagerView {
+                        current,
+                        total,
+                        page_size,
+                        item_count: all.len(),
+                        prev_url: (current > 1).then(|| page_url(&section.url, current - 1)),
+                        next_url: (current < total).then(|| page_url(&section.url, current + 1)),
+                        first_url: section.url.clone(),
+                        last_url: page_url(&section.url, total),
+                        links,
+                    }),
+                },
+                &["section.html"],
+            ));
+        }
+    }
+    for tag in &content.tags {
+        lists.push((
+            ListView {
+                title: &tag.title,
+                url: tag.url.clone(),
+                description: "",
+                content: "",
+                pages: index
+                    .tag(&tag.key)
+                    .iter()
+                    .copied()
+                    .map(|page| card(page, summaries))
+                    .collect(),
+                paginator: None,
+            },
+            &["tag.html", "section.html"],
+        ));
+    }
+    lists.push((
+        ListView {
+            title: "404",
+            url: "/404.html".to_string(),
+            description: "",
+            content: "",
+            pages: Vec::new(),
+            paginator: None,
+        },
+        &["404.html"],
+    ));
+    Ok(lists)
 }
 
 fn write_aliases(cfg: &Config, page: &Page) -> Result<()> {
@@ -840,7 +913,16 @@ fn page_view<'a>(
     }
 }
 
-fn card(page: &Page) -> CardView<'_> {
+fn describe<'a>(page: &'a Page, summary: &'a str) -> &'a str {
+    if page.description.is_empty() {
+        summary
+    } else {
+        &page.description
+    }
+}
+
+fn card<'a>(page: &'a Page, summaries: &HashMap<&'a str, &'a str>) -> CardView<'a> {
+    let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
     CardView {
         title: &page.title,
         url: &page.url,
@@ -848,13 +930,13 @@ fn card(page: &Page) -> CardView<'_> {
         date_display: &page.date_display,
         datetime: &page.datetime,
         reading_minutes: page.reading_minutes,
-        summary: page.plain_description(),
+        summary: describe(page, summary),
         tags: &page.tags,
         section: page.section.as_deref(),
     }
 }
 
-fn rss(cfg: &Config, pages: &[Page]) -> String {
+fn rss(cfg: &Config, pages: &[Page], summaries: &HashMap<&str, &str>) -> String {
     let mut items = String::new();
     for page in pages
         .iter()
@@ -863,6 +945,7 @@ fn rss(cfg: &Config, pages: &[Page]) -> String {
     {
         let link = cfg.absolute(&page.url);
         let pub_date = page.rss_date();
+        let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
         items.push_str(&format!(
             "<item><title>{}</title><link>{}</link><guid isPermaLink=\"true\">{}</guid>{}<description>{}</description></item>",
             escape_html(&page.title),
@@ -873,7 +956,7 @@ fn rss(cfg: &Config, pages: &[Page]) -> String {
             } else {
                 format!("<pubDate>{pub_date}</pubDate>")
             },
-            escape_html(page.plain_description()),
+            escape_html(describe(page, summary)),
         ));
     }
     format!(
@@ -885,47 +968,54 @@ fn rss(cfg: &Config, pages: &[Page]) -> String {
     )
 }
 
-fn search_index(pages: &[Page]) -> Result<String> {
+fn search_index(pages: &[Page], summaries: &HashMap<&str, &str>) -> Result<String> {
     let entries: Vec<SearchEntry<'_>> = pages
         .iter()
         .filter(|page| page.date.is_some())
-        .map(|page| SearchEntry {
-            title: &page.title,
-            url: &page.url,
-            date: &page.datetime,
-            description: page.plain_description(),
-            summary: &page.summary,
-            tags: &page.tags,
+        .map(|page| {
+            let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
+            SearchEntry {
+                title: &page.title,
+                url: &page.url,
+                date: &page.datetime,
+                description: describe(page, summary),
+                summary,
+                tags: &page.tags,
+            }
         })
         .collect();
     serde_json::to_string(&entries).context("serializing search-index.json")
 }
 
 fn sitemap(cfg: &Config, content: &Content) -> String {
-    let mut entries: Vec<(String, Option<OffsetDateTime>)> =
-        vec![("/".to_string(), content.home.date)];
-    entries.extend(
-        content
-            .pages
-            .iter()
-            .map(|page| (page.url.clone(), page.updated.or(page.date))),
-    );
-    entries.extend(content.sections.iter().map(|s| (s.url.clone(), None)));
-    entries.extend(content.tags.iter().map(|t| (t.url.clone(), None)));
-
-    let mut urls = String::new();
-    for (url, date) in entries {
-        urls.push_str("<url><loc>");
-        urls.push_str(&escape_html(&cfg.absolute(&url)));
-        urls.push_str("</loc>");
-        if let Some(lastmod) = date.and_then(|d| d.format(&Rfc3339).ok()) {
-            urls.push_str(&format!("<lastmod>{lastmod}</lastmod>"));
-        }
-        urls.push_str("</url>");
+    let count = content.pages.len() + content.sections.len() + content.tags.len() + 1;
+    let mut urls = String::with_capacity(count * 96);
+    push_url(&mut urls, cfg, "/", content.home.date);
+    for page in &content.pages {
+        push_url(&mut urls, cfg, &page.url, page.updated.or(page.date));
+    }
+    for section in &content.sections {
+        push_url(&mut urls, cfg, &section.url, None);
+    }
+    for tag in &content.tags {
+        push_url(&mut urls, cfg, &tag.url, None);
     }
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">{urls}</urlset>\n"
     )
+}
+
+fn push_url(out: &mut String, cfg: &Config, url: &str, date: Option<OffsetDateTime>) {
+    out.push_str("<url><loc>");
+    push_escaped(out, &cfg.base_url);
+    push_escaped(out, url);
+    out.push_str("</loc>");
+    if let Some(lastmod) = date.and_then(|value| value.format(&Rfc3339).ok()) {
+        out.push_str("<lastmod>");
+        out.push_str(&lastmod);
+        out.push_str("</lastmod>");
+    }
+    out.push_str("</url>");
 }
 
 pub fn remove_all(path: &Path) -> std::io::Result<()> {

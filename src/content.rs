@@ -66,9 +66,12 @@ impl Page {
             .unwrap_or_default()
     }
 
-    pub fn plain_description(&self) -> &str {
+    /// Description used in feeds, cards and meta tags. `summary` is the
+    /// effective summary: either the frontmatter value or the text agno
+    /// extracted from the rendered first paragraph.
+    pub fn plain_description<'a>(&'a self, summary: &'a str) -> &'a str {
         if self.description.is_empty() {
-            &self.summary
+            summary
         } else {
             &self.description
         }

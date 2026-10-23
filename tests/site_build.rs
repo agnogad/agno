@@ -720,3 +720,25 @@ fn minify_collapses_template_whitespace_but_not_code() {
     assert!(post.contains("<pre class=\"code\">"), "code block missing");
     assert!(post.contains("main</span>"), "code block lost its content");
 }
+
+#[test]
+fn cards_use_the_rendered_summary_when_no_description_is_set() {
+    let root = fixture("summary-cards");
+    fs::write(
+        root.join("content/blog/nodesc.md"),
+        "+++\ntitle = \"No Description\"\ndate = 2024-03-03\n+++\n\nAuto summary sentence here.\n\nBody follows.\n",
+    )
+    .unwrap();
+
+    build_incremental(&root);
+    let home = text(&root.join("dist/index.html"));
+    assert!(home.contains("Auto summary sentence here."), "{home}");
+
+    let feed = text(&root.join("dist/rss.xml"));
+    assert!(feed.contains("Auto summary sentence here."), "{feed}");
+
+    // The second build reuses the cached page; the summary must survive.
+    build_incremental(&root);
+    let home = text(&root.join("dist/index.html"));
+    assert!(home.contains("Auto summary sentence here."), "{home}");
+}

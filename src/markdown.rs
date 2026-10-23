@@ -296,6 +296,12 @@ fn sanitize_lang(lang: &str) -> String {
 
 pub fn escape_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
+    push_escaped(&mut out, input);
+    out
+}
+
+/// Append `input` to `out`, escaping the five HTML-significant characters.
+pub fn push_escaped(out: &mut String, input: &str) {
     for c in input.chars() {
         match c {
             '&' => out.push_str("&amp;"),
@@ -306,7 +312,6 @@ pub fn escape_html(input: &str) -> String {
             _ => out.push(c),
         }
     }
-    out
 }
 
 #[cfg(test)]
