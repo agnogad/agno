@@ -591,6 +591,34 @@ fn sections_can_paginate_their_pages() {
     assert!(third.contains("3 / 3"));
     assert!(!third.contains("Older →"), "last page has no next link");
     assert!(!root.join("dist/blog/page/4").exists());
+
+    let sitemap = text(&root.join("dist/sitemap.xml"));
+    assert!(sitemap.contains("/blog/page/2/"), "{sitemap}");
+    assert!(sitemap.contains("/blog/page/3/"), "{sitemap}");
+}
+
+#[test]
+fn templates_can_read_the_updated_date_and_sections() {
+    let root = fixture("updated");
+    fs::write(
+        root.join("content/blog/hello.md"),
+        "+++\ntitle = \"Hello\"\ndate = 2024-05-01\nupdated = 2024-06-02\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/page.html"),
+        "updated={{ page.updated }}|display={{ page.updated_display }}|\
+         sections={% for s in site.sections %}{{ s.title }}:{{ s.count }} {% endfor %}",
+    )
+    .unwrap();
+
+    clean_build(&root);
+
+    let page = text(&root.join("dist/blog/hello/index.html"));
+    assert!(page.contains("updated=2024-06-02"), "{page}");
+    assert!(page.contains("display=June 2, 2024"), "{page}");
+    assert!(page.contains("sections=Blog:1"), "{page}");
 }
 
 #[test]
@@ -626,6 +654,25 @@ fn aliases_emit_redirect_pages() {
 }
 
 #[test]
+fn self_aliases_and_repeated_aliases_are_dropped() {
+    let root = fixture("alias-self");
+    fs::write(
+        root.join("content/blog/self.md"),
+        "+++\ntitle = \"Self\"\ndate = 2024-01-01\naliases = [\"/blog/self/\", \"/old/\", \"/old/\"]\n+++\n\nBody.\n",
+    )
+    .unwrap();
+
+    clean_build(&root);
+
+    let page = text(&root.join("dist/blog/self/index.html"));
+    assert!(
+        !page.contains("http-equiv=\"refresh\""),
+        "the page was replaced by a redirect to itself: {page}"
+    );
+    assert!(root.join("dist/old/index.html").is_file());
+}
+
+#[test]
 fn an_alias_that_collides_with_a_page_is_rejected() {
     let root = fixture("alias-conflict");
     fs::write(
@@ -645,6 +692,69 @@ fn an_alias_that_collides_with_a_page_is_rejected() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("duplicate output URL"), "{err}");
+}
+
+#[test]
+fn check_scans_home_and_section_bodies() {
+    let root = fixture("check-index");
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\n+++\n\nSee [the archive](/archive/).\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/_index.md"),
+        "+++\ntitle = \"Home\"\n+++\n\nWelcome **home**. Read [about](/about/).\n",
+    )
+    .unwrap();
+
+    let report = agno::check::check(&root, false).unwrap();
+    assert!(!report.ok(), "a broken _index.md link must fail the check");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("archive") && error.contains("_index.md")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn check_validates_anchor_targets() {
+    let root = fixture("check-anchor");
+    fs::write(
+        root.join("content/blog/target.md"),
+        "+++\ntitle = \"Target\"\ndate = 2024-01-02\n+++\n\n## Deep Section\n\nBody.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/anchors.md"),
+        "+++\ntitle = \"Anchors\"\ndate = 2024-01-01\n+++\n\n## Real Heading\n\n\
+         [ok](#real-heading)\n\n[bad](#nope)\n\n[good](/blog/target/#deep-section)\n\n\
+         [cross](/blog/target/#missing)\n",
+    )
+    .unwrap();
+
+    let report = agno::check::check(&root, false).unwrap();
+    assert!(
+        report.errors.iter().any(|error| error.contains("#nope")),
+        "{:?}",
+        report.errors
+    );
+    assert!(
+        report.errors.iter().any(|error| error.contains("#missing")),
+        "{:?}",
+        report.errors
+    );
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|error| error.contains("#real-heading") || error.contains("#deep-section")),
+        "valid anchors were reported: {:?}",
+        report.errors
+    );
 }
 
 #[test]
@@ -719,6 +829,69 @@ fn minify_collapses_template_whitespace_but_not_code() {
     assert!(!post.contains("    <meta"), "indentation survived");
     assert!(post.contains("<pre class=\"code\">"), "code block missing");
     assert!(post.contains("main</span>"), "code block lost its content");
+}
+
+#[test]
+fn rebuild_recreates_an_output_directory_that_was_removed() {
+    let root = fixture("dir-reuse");
+    fs::create_dir_all(root.join("content/blog/2024")).unwrap();
+    let source = root.join("content/blog/2024/first.md");
+    let body = "+++\ntitle = \"First\"\ndate = 2024-01-01\n+++\n\nBody.\n";
+    fs::write(&source, body).unwrap();
+    build_incremental(&root);
+    assert!(root.join("dist/blog/2024/first/index.html").is_file());
+
+    // Dropping the only page under blog/2024 lets the stale cleanup delete that
+    // directory, which the per-thread mkdir cache has already recorded.
+    fs::remove_file(&source).unwrap();
+    build_incremental(&root);
+    assert!(!root.join("dist/blog/2024").exists(), "stale dir survived");
+
+    // Restoring the page has to recreate the directory the cache still claims.
+    fs::write(&source, body).unwrap();
+    build_incremental(&root);
+    assert!(root.join("dist/blog/2024/first/index.html").is_file());
+}
+
+#[test]
+fn a_no_op_rebuild_leaves_generated_files_untouched() {
+    let root = fixture("noop-mtimes");
+    build_incremental(&root);
+    let rss = root.join("dist/rss.xml");
+    let sitemap = root.join("dist/sitemap.xml");
+    let manifest = root.join(".agno-cache/outputs.json");
+    let before = (modified(&rss), modified(&sitemap), modified(&manifest));
+
+    build_incremental(&root);
+
+    assert_eq!(
+        before,
+        (modified(&rss), modified(&sitemap), modified(&manifest)),
+        "a rebuild rewrote a feed or the manifest even though nothing changed"
+    );
+}
+
+#[test]
+fn a_card_neutral_edit_leaves_the_list_pages_alone() {
+    let root = fixture("card-key");
+    build_incremental(&root);
+    let home = root.join("dist/index.html");
+    let before = modified(&home);
+
+    let post = root.join("content/blog/hello.md");
+    let original = fs::read_to_string(&post).unwrap();
+    fs::write(&post, format!("{original}\n\nA trailing paragraph.\n")).unwrap();
+    build_incremental(&root);
+
+    assert_eq!(
+        before,
+        modified(&home),
+        "the home list was rewritten although no card changed"
+    );
+    assert!(
+        text(&root.join("dist/blog/hello/index.html")).contains("trailing paragraph"),
+        "the edited page itself was not re-rendered"
+    );
 }
 
 #[test]

@@ -14,6 +14,7 @@ use serde_json::Value as Json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -47,6 +48,14 @@ struct SiteView<'a> {
     year: i32,
     post_count: usize,
     tags: Vec<TagView<'a>>,
+    sections: Vec<SectionView<'a>>,
+}
+
+#[derive(Serialize)]
+struct SectionView<'a> {
+    title: &'a str,
+    url: &'a str,
+    count: usize,
 }
 
 #[derive(Serialize)]
@@ -65,6 +74,8 @@ struct PageView<'a> {
     date: &'a str,
     date_display: &'a str,
     datetime: &'a str,
+    updated: &'a str,
+    updated_display: &'a str,
     reading_minutes: u32,
     words: u32,
     description: &'a str,
@@ -89,6 +100,9 @@ struct CardView<'a> {
     summary: &'a str,
     tags: &'a [String],
     section: Option<&'a str>,
+    /// Hash of everything this card displays, used to key the list cache.
+    #[serde(skip)]
+    key: u64,
 }
 
 #[derive(Serialize)]
@@ -152,10 +166,13 @@ impl<'a> PageIndex<'a> {
             if let Some(section) = page.section.as_deref() {
                 sections.entry(section).or_default().push(page);
             }
-            let mut seen = HashSet::new();
+            // Pages carry a handful of tags, so a linear scan beats building a
+            // set per page just to drop duplicates that share a slug.
+            let mut seen: Vec<String> = Vec::new();
             for tag in &page.tags {
                 let slug = content::slugify(tag);
-                if !slug.is_empty() && seen.insert(slug.clone()) {
+                if !slug.is_empty() && !seen.contains(&slug) {
+                    seen.push(slug.clone());
                     tags.entry(slug).or_default().push(page);
                 }
             }
@@ -185,6 +202,9 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         cfg.minify = true;
     }
     cfg.validate()?;
+    // Every worker forgets which directories exist, because the stale-output
+    // sweep below may delete some of them.
+    BUILD_GENERATION.fetch_add(1, Ordering::Relaxed);
 
     let phase = Instant::now();
     let content = content::load(&cfg, opts.drafts)?;
@@ -210,9 +230,16 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let static_files = static_files(&cfg)?;
     let static_paths = static_rels(&cfg, &static_files)?;
     let has_static_style = static_paths.iter().any(|path| path == "style.css");
+    // Read the previous manifest once: stale cleanup and the final write both
+    // need it, and it doubles as the "did anything change?" check below.
+    let previous = if opts.clean {
+        None
+    } else {
+        read_manifest(root)
+    };
     let mut expected = expected_outputs(&cfg, &content, &static_paths)?;
-    if !opts.clean {
-        remove_stale(root, &output, &expected)?;
+    if let Some(previous) = &previous {
+        remove_stale(&output, previous, &expected)?;
     }
 
     // ---- pages ----
@@ -241,7 +268,8 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     content
         .pages
         .par_iter()
-        .try_for_each(|page| write_aliases(&cfg, page))?;
+        .zip(&fresh)
+        .try_for_each(|(page, fresh)| write_aliases(&cfg, page, fresh.is_some()))?;
 
     // A page's summary comes from its own Markdown, so it is only known once
     // the page has rendered (or read back from the fingerprint cache).
@@ -308,10 +336,10 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
 
     copy_static(&cfg, &static_files)?;
     if !has_static_style {
-        fs::write(output.join("style.css"), theme::STYLE).context("writing default style.css")?;
+        write_text(&output, "style.css", theme::STYLE)?;
     }
 
-    write_manifest(root, &output, &expected)?;
+    write_manifest(root, &output, &expected, previous.as_ref())?;
 
     // Only rewrite the fingerprint file when the page or list set changed.
     let expected_entries = content.pages.len() + lists.len();
@@ -403,6 +431,17 @@ fn build_lists<'a>(
     index: &PageIndex<'a>,
     summaries: &HashMap<&'a str, &'a str>,
 ) -> Result<Vec<(ListView<'a>, &'static [&'static str])>> {
+    // A page's card is identical in every list it appears in, so its
+    // fingerprint is computed once here instead of once per list.
+    let keys: HashMap<&str, u64> = content
+        .pages
+        .iter()
+        .map(|page| {
+            let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
+            (page.url.as_str(), card_key(page, summary))
+        })
+        .collect();
+
     let mut lists: Vec<(ListView<'a>, &'static [&'static str])> = Vec::new();
     lists.push((
         ListView {
@@ -413,7 +452,7 @@ fn build_lists<'a>(
             pages: content
                 .pages
                 .iter()
-                .map(|page| card(page, summaries))
+                .map(|page| card(page, summaries, &keys))
                 .collect(),
             paginator: None,
         },
@@ -424,7 +463,7 @@ fn build_lists<'a>(
             .section(&section.key)
             .iter()
             .copied()
-            .map(|page| card(page, summaries))
+            .map(|page| card(page, summaries, &keys))
             .collect();
         let page_size = section.paginate_by.unwrap_or(0);
         let total = section_page_count(section, all.len());
@@ -490,7 +529,7 @@ fn build_lists<'a>(
                     .tag(&tag.key)
                     .iter()
                     .copied()
-                    .map(|page| card(page, summaries))
+                    .map(|page| card(page, summaries, &keys))
                     .collect(),
                 paginator: None,
             },
@@ -511,8 +550,13 @@ fn build_lists<'a>(
     Ok(lists)
 }
 
-fn write_aliases(cfg: &Config, page: &Page) -> Result<()> {
+fn write_aliases(cfg: &Config, page: &Page, changed: bool) -> Result<()> {
     for alias in &page.aliases {
+        // An unchanged page keeps its redirect files: rewriting them on every
+        // build only churns mtimes and slows no-op rebuilds down.
+        if !changed && output_path(cfg, alias).is_file() {
+            continue;
+        }
         let body = redirect_page(&cfg.absolute(&page.url), &page.title);
         write_output(cfg, alias, &body)
             .with_context(|| format!("writing alias {alias} for {}", page.url))?;
@@ -611,17 +655,11 @@ fn list_key(header: u64, template: &str, list: &ListView<'_>) -> u64 {
     hash = cache::fingerprint(hash, list.description.as_bytes());
     hash = cache::fingerprint(hash, list.content.as_bytes());
     for card in &list.pages {
+        // Each card carries a fingerprint of the fields it renders, computed
+        // once per page, so a list hashes two words per card instead of every
+        // field of every card.
         hash = cache::fingerprint(hash, card.url.as_bytes());
-        hash = cache::fingerprint(hash, card.title.as_bytes());
-        hash = cache::fingerprint(hash, card.date.as_bytes());
-        hash = cache::fingerprint(hash, card.date_display.as_bytes());
-        hash = cache::fingerprint(hash, card.datetime.as_bytes());
-        hash = cache::fingerprint(hash, card.summary.as_bytes());
-        hash = cache::fingerprint(hash, card.section.unwrap_or_default().as_bytes());
-        hash = cache::fingerprint(hash, &card.reading_minutes.to_le_bytes());
-        for tag in card.tags {
-            hash = cache::fingerprint(hash, tag.as_bytes());
-        }
+        hash = cache::fingerprint(hash, &card.key.to_le_bytes());
     }
     if let Some(pager) = &list.paginator {
         for number in [
@@ -649,29 +687,45 @@ fn write_output(cfg: &Config, url: &str, html: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
-    let body = if cfg.minify {
-        crate::minify::minify_html(html)
+    if cfg.minify {
+        let body = crate::minify::minify_html(html);
+        fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
     } else {
-        html.to_string()
-    };
-    fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
+        // Writing the rendered string straight through avoids copying every
+        // page's HTML into a second buffer just to hand it to `fs::write`.
+        fs::write(&path, html.as_bytes()).with_context(|| format!("writing {}", path.display()))
+    }
 }
 
 thread_local! {
-    /// Directories this worker already created. Avoids one `mkdir` syscall per
-    /// page while still keeping writes independent across threads.
-    static KNOWN_DIRS: std::cell::RefCell<HashSet<PathBuf>> =
-        std::cell::RefCell::new(HashSet::new());
+    /// Directories this worker already created, tagged with the build that
+    /// created them. Avoids one `mkdir` syscall per page while still keeping
+    /// writes independent across threads. The tag matters: stale cleanup can
+    /// delete a directory between two builds in the same process (`agno dev`),
+    /// and a cache that outlived its build would skip recreating it.
+    static KNOWN_DIRS: std::cell::RefCell<(u64, HashSet<PathBuf>)> =
+        std::cell::RefCell::new((0, HashSet::new()));
 }
 
+/// Bumped once per build so every worker drops its directory cache.
+static BUILD_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 fn ensure_dir(dir: &Path) -> Result<()> {
-    let known = KNOWN_DIRS.with(|dirs| dirs.borrow().contains(dir));
+    let generation = BUILD_GENERATION.load(Ordering::Relaxed);
+    let known = KNOWN_DIRS.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if cell.0 != generation {
+            cell.0 = generation;
+            cell.1.clear();
+        }
+        cell.1.contains(dir)
+    });
     if known {
         return Ok(());
     }
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    KNOWN_DIRS.with(|dirs| {
-        dirs.borrow_mut().insert(dir.to_path_buf());
+    KNOWN_DIRS.with(|cell| {
+        cell.borrow_mut().1.insert(dir.to_path_buf());
     });
     Ok(())
 }
@@ -681,21 +735,27 @@ fn output_path(cfg: &Config, url: &str) -> PathBuf {
 }
 
 pub fn output_rel(url: &str) -> String {
-    let mut segments: Vec<&str> = url
+    // Built straight into one buffer: this runs a handful of times per page per
+    // build, and a `Vec` of segments plus a `join` doubled the allocations.
+    let mut out = String::with_capacity(url.len() + 11);
+    let mut empty = true;
+    for segment in url
         .split('/')
         .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
-        .collect();
-    if url.ends_with('/') || segments.is_empty() {
-        segments.push("index.html");
+    {
+        if !empty {
+            out.push('/');
+        }
+        out.push_str(segment);
+        empty = false;
     }
-    segments.join("/")
-}
-
-fn ancestors(path: &str) -> Vec<&str> {
-    path.char_indices()
-        .filter(|(_, ch)| *ch == '/')
-        .map(|(index, _)| &path[..index])
-        .collect()
+    if url.ends_with('/') || empty {
+        if !empty {
+            out.push('/');
+        }
+        out.push_str("index.html");
+    }
+    out
 }
 
 pub fn validate_outputs(cfg: &Config, content: &Content) -> Result<()> {
@@ -706,14 +766,19 @@ fn validate_urls(cfg: &Config, content: &Content) -> Result<()> {
     let mut files: HashMap<String, String> = HashMap::new();
     let mut dirs: HashSet<String> = HashSet::new();
     let mut add = |url: &str, what: &str| -> Result<()> {
-        let key = output_rel(url).to_ascii_lowercase();
+        let mut key = output_rel(url);
+        // URL matching is case-insensitive, which is what a static host does.
+        key.make_ascii_lowercase();
         if let Some(existing) = files.insert(key.clone(), what.to_string()) {
             bail!("duplicate output URL {url}: {existing} and {what}");
         }
         if dirs.contains(&key) {
             bail!("output path conflict at {url}: another output is below it");
         }
-        for parent in ancestors(&key) {
+        // Walk the parent directories without collecting them into a `Vec`:
+        // this runs once per output path.
+        for (index, _) in key.char_indices().filter(|(_, ch)| *ch == '/') {
+            let parent = &key[..index];
             if let Some(existing) = files.get(parent) {
                 bail!("output path conflict at {url}: {existing} is a file at {parent}");
             }
@@ -793,13 +858,24 @@ fn read_manifest(root: &Path) -> Option<Manifest> {
     serde_json::from_str(&src).ok()
 }
 
-fn write_manifest(root: &Path, output: &Path, expected: &HashSet<String>) -> Result<()> {
+fn write_manifest(
+    root: &Path,
+    output: &Path,
+    expected: &HashSet<String>,
+    previous: Option<&Manifest>,
+) -> Result<()> {
+    let mut files: Vec<String> = expected.iter().cloned().collect();
+    files.sort();
+    if let Some(previous) = previous
+        && previous.output == output.to_string_lossy()
+        && previous.files == files
+    {
+        return Ok(());
+    }
     let path = manifest_path(root);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    let mut files: Vec<String> = expected.iter().cloned().collect();
-    files.sort();
     let manifest = Manifest {
         output: output.to_string_lossy().to_string(),
         files,
@@ -808,22 +884,19 @@ fn write_manifest(root: &Path, output: &Path, expected: &HashSet<String>) -> Res
     fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
-fn remove_stale(root: &Path, output: &Path, expected: &HashSet<String>) -> Result<()> {
-    let Some(manifest) = read_manifest(root) else {
-        return Ok(());
-    };
-    if manifest.output != output.to_string_lossy().as_ref() {
+fn remove_stale(output: &Path, manifest: &Manifest, expected: &HashSet<String>) -> Result<()> {
+    if manifest.output != output.to_string_lossy() {
         return Ok(());
     }
-    for rel in manifest.files {
-        if expected.contains(&rel)
+    for rel in &manifest.files {
+        if expected.contains(rel)
             || rel.is_empty()
             || rel.starts_with('/')
             || rel.split('/').any(|part| part == "." || part == "..")
         {
             continue;
         }
-        let path = output.join(&rel);
+        let path = output.join(rel);
         match fs::remove_file(&path) {
             Ok(()) => {
                 let mut parent = path.parent();
@@ -845,6 +918,13 @@ fn remove_stale(root: &Path, output: &Path, expected: &HashSet<String>) -> Resul
 
 fn write_text(output: &Path, name: &str, body: &str) -> Result<()> {
     let path = output.join(name);
+    // A no-op rebuild regenerates identical feeds and manifests. Skipping the
+    // write keeps their mtimes stable, which matters for rsync-style deploys.
+    if let Ok(existing) = fs::read(&path)
+        && existing == body.as_bytes()
+    {
+        return Ok(());
+    }
     fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
@@ -869,6 +949,15 @@ fn site_view<'a>(cfg: &Config, content: &'a Content, index: &PageIndex<'a>) -> S
             }
         })
         .collect();
+    let sections = content
+        .sections
+        .iter()
+        .map(|section| SectionView {
+            title: &section.title,
+            url: &section.url,
+            count: index.section(&section.key).len(),
+        })
+        .collect();
     SiteView {
         title: cfg.title.clone(),
         description: cfg.description.clone(),
@@ -879,6 +968,7 @@ fn site_view<'a>(cfg: &Config, content: &'a Content, index: &PageIndex<'a>) -> S
         year: OffsetDateTime::now_utc().year(),
         post_count,
         tags,
+        sections,
     }
 }
 
@@ -895,6 +985,8 @@ fn page_view<'a>(
         date: &page.date_text,
         date_display: &page.date_display,
         datetime: &page.datetime,
+        updated: &page.updated_text,
+        updated_display: &page.updated_display,
         reading_minutes: page.reading_minutes,
         words: page.words,
         description: if page.description.is_empty() {
@@ -921,7 +1013,11 @@ fn describe<'a>(page: &'a Page, summary: &'a str) -> &'a str {
     }
 }
 
-fn card<'a>(page: &'a Page, summaries: &HashMap<&'a str, &'a str>) -> CardView<'a> {
+fn card<'a>(
+    page: &'a Page,
+    summaries: &HashMap<&'a str, &'a str>,
+    keys: &HashMap<&'a str, u64>,
+) -> CardView<'a> {
     let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
     CardView {
         title: &page.title,
@@ -933,7 +1029,26 @@ fn card<'a>(page: &'a Page, summaries: &HashMap<&'a str, &'a str>) -> CardView<'
         summary: describe(page, summary),
         tags: &page.tags,
         section: page.section.as_deref(),
+        key: keys.get(page.url.as_str()).copied().unwrap_or(0),
     }
+}
+
+/// Hash of everything a card puts on the page. A list is re-rendered only when
+/// one of its cards would actually look different, so editing a paragraph that
+/// does not touch the summary leaves the home page and the tag pages alone.
+fn card_key(page: &Page, summary: &str) -> u64 {
+    let mut hash = cache::fingerprint(0, page.title.as_bytes());
+    hash = cache::fingerprint(hash, page.url.as_bytes());
+    hash = cache::fingerprint(hash, page.date_text.as_bytes());
+    hash = cache::fingerprint(hash, page.date_display.as_bytes());
+    hash = cache::fingerprint(hash, page.datetime.as_bytes());
+    hash = cache::fingerprint(hash, describe(page, summary).as_bytes());
+    hash = cache::fingerprint(hash, page.section.as_deref().unwrap_or_default().as_bytes());
+    hash = cache::fingerprint(hash, &page.reading_minutes.to_le_bytes());
+    for tag in &page.tags {
+        hash = cache::fingerprint(hash, tag.as_bytes());
+    }
+    hash
 }
 
 fn rss(cfg: &Config, pages: &[Page], summaries: &HashMap<&str, &str>) -> String {
@@ -994,8 +1109,19 @@ fn sitemap(cfg: &Config, content: &Content) -> String {
     for page in &content.pages {
         push_url(&mut urls, cfg, &page.url, page.updated.or(page.date));
     }
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for page in &content.pages {
+        if let Some(section) = page.section.as_deref() {
+            *counts.entry(section).or_default() += 1;
+        }
+    }
     for section in &content.sections {
         push_url(&mut urls, cfg, &section.url, None);
+        // Paginated listings are real pages with their own canonical URLs.
+        let count = counts.get(section.key.as_str()).copied().unwrap_or(0);
+        for number in 2..=section_page_count(section, count) {
+            push_url(&mut urls, cfg, &page_url(&section.url, number), None);
+        }
     }
     for tag in &content.tags {
         push_url(&mut urls, cfg, &tag.url, None);
@@ -1075,6 +1201,13 @@ fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
     files.par_iter().try_for_each(|file| {
         let rel = file.strip_prefix(&src)?;
         let target = dest.join(rel);
+        // `fs::copy` stamps the target with the current time, so a target that
+        // is at least as new as its source with the same size is already a
+        // faithful copy. Re-copying untouched assets was the bulk of a rebuild
+        // on sites with images or fonts.
+        if is_up_to_date(file, &target) {
+            return Ok(());
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -1082,6 +1215,19 @@ fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())
+}
+
+fn is_up_to_date(source: &Path, target: &Path) -> bool {
+    let (Ok(src), Ok(dst)) = (fs::metadata(source), fs::metadata(target)) else {
+        return false;
+    };
+    if src.len() != dst.len() {
+        return false;
+    }
+    match (src.modified(), dst.modified()) {
+        (Ok(src), Ok(dst)) => dst >= src,
+        _ => false,
+    }
 }
 
 fn rel_string(path: &Path) -> String {
@@ -1093,9 +1239,23 @@ fn rel_string(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::remove_all;
+    use super::{output_rel, remove_all};
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn output_rel_maps_urls_to_files() {
+        assert_eq!(output_rel("/"), "index.html");
+        assert_eq!(output_rel("/blog/"), "blog/index.html");
+        assert_eq!(output_rel("/blog/page/2/"), "blog/page/2/index.html");
+        assert_eq!(output_rel("/blog/thing.html"), "blog/thing.html");
+        assert_eq!(
+            output_rel("/blog/thing.html/"),
+            "blog/thing.html/index.html"
+        );
+        assert_eq!(output_rel("/a//b/"), "a/b/index.html");
+        assert_eq!(output_rel("/a/../b/"), "a/b/index.html");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("agno-rm-{}-{name}", std::process::id()));

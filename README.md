@@ -156,7 +156,9 @@ also drops the cache.
 
 `agno check` resolves every internal Markdown link and image against the files
 the build will produce, and fails with exit code 1 when something is missing.
-It also reports pages whose `template` does not exist and pages without a date.
+It scans page bodies and `_index.md` landing pages, follows `#fragment`
+targets to the headings they name, and reports pages whose `template` does not
+exist and pages without a date.
 
 ```sh
 $ agno check
@@ -237,7 +239,9 @@ back to them, so a site still builds without a `templates/` directory.
 | --- | --- |
 | `site.title`, `site.description`, `site.base_url`, `site.language`, `site.author`, `site.menu`, `site.year`, `site.post_count` | Site metadata |
 | `site.tags[].name`, `.url`, `.count`, `.latest_title`, `.latest_url` | Tags with post counts and the newest tagged post |
+| `site.sections[].title`, `.url`, `.count` | Top-level sections, for building navigation |
 | `page.title`, `page.url`, `page.date`, `page.date_display`, `page.datetime`, `page.reading_minutes`, `page.description`, `page.content`, `page.tags`, `page.categories`, `page.slug`, `page.section`, `page.extra` | Current page or list page |
+| `page.updated`, `page.updated_display` | The `updated` frontmatter date, if set |
 | `page.words`, `page.toc`, `page.toc_html` | Word count, heading tree (`level`, `id`, `title`, `children`), and the same tree rendered as nested `<ul>` |
 | `page.paginator` | Pagination state on section pages: `current`, `total`, `page_size`, `item_count`, `prev_url`, `next_url`, `first_url`, `last_url`, `links[]` |
 | `pages[].title`, `.url`, `.date`, `.date_display`, `.datetime`, `.reading_minutes`, `.summary`, `.tags`, `.section` | Page cards in list templates |
