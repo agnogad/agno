@@ -194,22 +194,30 @@ fn split_anchor(target: &str) -> (&str, Option<&str>) {
 fn heading_ids(body: &str) -> HashSet<String> {
     let rendered = markdown::render(body, false);
     let mut ids: HashSet<String> = rendered.anchors().iter().cloned().collect();
-    for id in raw_ids(&strip_code_fences(body)) {
+    for id in raw_ids(body) {
         ids.insert(id);
     }
     ids
 }
 
+/// Ids written as raw HTML. Parsing events instead of scanning the source keeps
+/// `id=` strings inside inline code and fenced blocks from counting as anchors.
 fn raw_ids(body: &str) -> Vec<String> {
     let mut ids = Vec::new();
-    for (index, _) in body.match_indices("id=") {
-        let rest = &body[index + 3..];
-        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-            continue;
+    for event in Parser::new_ext(body, markdown::options()) {
+        let html = match event {
+            Event::Html(html) | Event::InlineHtml(html) => html,
+            _ => continue,
         };
-        let value = &rest[quote.len_utf8()..];
-        if let Some(end) = value.find(quote) {
-            ids.push(value[..end].to_string());
+        for (index, _) in html.match_indices("id=") {
+            let rest = &html[index + 3..];
+            let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                continue;
+            };
+            let value = &rest[quote.len_utf8()..];
+            if let Some(end) = value.find(quote) {
+                ids.push(value[..end].to_string());
+            }
         }
     }
     ids
@@ -275,26 +283,6 @@ fn has_scheme(target: &str) -> bool {
     let mut chars = scheme.chars();
     chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-}
-
-/// Blank out fenced code so links inside examples are not reported.
-fn strip_code_fences(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
-    let mut in_fence = false;
-    for line in body.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            out.push('\n');
-            continue;
-        }
-        if in_fence {
-            out.push('\n');
-        } else {
-            out.push_str(line);
-        }
-    }
-    out
 }
 
 /// Collect Markdown link and image targets with their body-relative line
