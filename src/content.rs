@@ -362,6 +362,16 @@ fn load_page(
         .split_once('/')
         .map(|(first, _)| first.to_string());
 
+    // An alias that points at the page itself, or repeats an earlier one, is a
+    // no-op rather than a conflict: it would otherwise fail the build with a
+    // duplicate-output error for something the author cannot see.
+    let mut deduped: Vec<String> = Vec::new();
+    for alias in parse_aliases(&fm, path)? {
+        if alias != url && !deduped.contains(&alias) {
+            deduped.push(alias);
+        }
+    }
+
     Ok(Some(Page {
         source: path.to_path_buf(),
         url,
@@ -381,7 +391,7 @@ fn load_page(
         summary,
         tags: field_string_list(&fm, "tags"),
         categories: field_string_list(&fm, "categories"),
-        aliases: parse_aliases(&fm, path)?,
+        aliases: deduped,
         template: field_str(&fm, "template"),
         extra: fm,
         body: body.to_string(),

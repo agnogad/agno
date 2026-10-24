@@ -654,6 +654,25 @@ fn aliases_emit_redirect_pages() {
 }
 
 #[test]
+fn self_aliases_and_repeated_aliases_are_dropped() {
+    let root = fixture("alias-self");
+    fs::write(
+        root.join("content/blog/self.md"),
+        "+++\ntitle = \"Self\"\ndate = 2024-01-01\naliases = [\"/blog/self/\", \"/old/\", \"/old/\"]\n+++\n\nBody.\n",
+    )
+    .unwrap();
+
+    clean_build(&root);
+
+    let page = text(&root.join("dist/blog/self/index.html"));
+    assert!(
+        !page.contains("http-equiv=\"refresh\""),
+        "the page was replaced by a redirect to itself: {page}"
+    );
+    assert!(root.join("dist/old/index.html").is_file());
+}
+
+#[test]
 fn an_alias_that_collides_with_a_page_is_rejected() {
     let root = fixture("alias-conflict");
     fs::write(
