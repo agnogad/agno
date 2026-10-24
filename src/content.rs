@@ -21,6 +21,8 @@ pub struct Page {
     pub date_text: String,
     pub date_display: String,
     pub datetime: String,
+    pub updated_text: String,
+    pub updated_display: String,
     pub reading_minutes: u32,
     pub words: u32,
     pub draft: bool,
@@ -48,6 +50,10 @@ pub struct Listing {
     pub url: String,
     pub description: String,
     pub content: String,
+    /// Markdown body of the section's `_index.md`, kept for `agno check`.
+    pub body: String,
+    /// Source file behind this listing, empty for synthesized sections.
+    pub source: PathBuf,
     /// Split this section's pages into `/section/page/N/` chunks of this size.
     pub paginate_by: Option<usize>,
 }
@@ -86,6 +92,8 @@ impl Listing {
             url: url.to_string(),
             description: String::new(),
             content: String::new(),
+            body: String::new(),
+            source: PathBuf::new(),
             paginate_by: None,
         }
     }
@@ -167,6 +175,8 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
             url: format!("/tags/{slug}/"),
             description: String::new(),
             content: String::new(),
+            body: String::new(),
+            source: PathBuf::new(),
             paginate_by: None,
         })
         .collect();
@@ -199,6 +209,7 @@ fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<Pag
     page.summary = field_str(&fm, "summary").unwrap_or(rendered.summary);
     page.extra = fm;
     page.html = rendered.html;
+    page.body = body.to_string();
     Ok(page)
 }
 
@@ -222,6 +233,8 @@ fn load_listing(
         url: url.to_string(),
         description: field_str(&fm, "description").unwrap_or_default(),
         content: rendered.html,
+        body: body.to_string(),
+        source: path.clone(),
         paginate_by: field_usize(&fm, "paginate_by").filter(|size| *size > 0),
     })
 }
@@ -266,16 +279,15 @@ fn load_page(
         .and_then(|s| parse_date(&s))
         .or_else(|| filename_date.and_then(parse_date));
     let updated = field_str(&fm, "updated").and_then(|s| parse_date(&s));
-    let date_text = date
-        .map(|d| {
-            d.format(format_description!("[year]-[month]-[day]"))
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
+    let date_text = date.map(ymd).unwrap_or_default();
     let datetime = date
         .and_then(|d| d.format(&Rfc3339).ok())
         .unwrap_or_default();
     let date_display = date
+        .map(|d| format_date_display(d, language))
+        .unwrap_or_default();
+    let updated_text = updated.map(ymd).unwrap_or_default();
+    let updated_display = updated
         .map(|d| format_date_display(d, language))
         .unwrap_or_default();
     let word_count = body.split_whitespace().count();
@@ -360,6 +372,8 @@ fn load_page(
         date_text,
         date_display,
         datetime,
+        updated_text,
+        updated_display,
         reading_minutes,
         words: word_count as u32,
         draft,
@@ -388,6 +402,8 @@ fn empty_page(title: String, url: String) -> Page {
         date_text: String::new(),
         date_display: String::new(),
         datetime: String::new(),
+        updated_text: String::new(),
+        updated_display: String::new(),
         reading_minutes: 0,
         words: 0,
         draft: false,
@@ -524,6 +540,12 @@ fn field_string_list(fm: &Value, key: &str) -> Vec<String> {
         Some(Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
     }
+}
+
+/// `YYYY-MM-DD`, the machine-readable date used by `<time datetime>` and feeds.
+fn ymd(date: OffsetDateTime) -> String {
+    date.format(format_description!("[year]-[month]-[day]"))
+        .unwrap_or_default()
 }
 
 pub fn format_date_display(date: OffsetDateTime, language: &str) -> String {

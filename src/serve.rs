@@ -12,6 +12,11 @@ use tiny_http::{Header, Request, Response, Server};
 const LIVE_SCRIPT: &str = r#"<script>(()=>{let v=null;setInterval(async()=>{try{const t=await (await fetch('/__agno/live',{cache:'no-store'})).text();if(v===null)v=t;else if(v!==t)location.reload()}catch(e){}},400)})();</script>"#;
 
 pub fn dev(root: PathBuf, port: u16, drafts: bool) -> Result<()> {
+    // Watch paths come back relative to the directory handed to `watch`, so a
+    // canonical root keeps them comparable with the output directory.
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("resolving {}", root.display()))?;
     let opts = BuildOptions {
         drafts,
         clean: true,
@@ -39,11 +44,23 @@ pub fn dev(root: PathBuf, port: u16, drafts: bool) -> Result<()> {
     }
 
     let (tx, rx) = mpsc::channel();
+    // Watch the whole site rather than the three input directories that happen
+    // to exist at startup: a `templates/` or `static/` directory created later
+    // used to be invisible until the server restarted. Build output and the
+    // fingerprint cache are filtered out, otherwise every write would schedule
+    // another build.
+    let ignored = [dist.clone(), root.join(".agno-cache")];
+    let watched_root = root.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if let Ok(event) = &event {
             let interesting =
                 event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove();
-            if !interesting {
+            if !interesting
+                || event
+                    .paths
+                    .iter()
+                    .all(|path| is_ignored(path, &watched_root, &ignored))
+            {
                 return;
             }
         }
@@ -51,17 +68,9 @@ pub fn dev(root: PathBuf, port: u16, drafts: bool) -> Result<()> {
     })
     .context("creating file watcher")?;
 
-    for dir in [cfg.content(), cfg.templates(), cfg.static_dir()] {
-        if dir.is_dir() {
-            watcher
-                .watch(&dir, RecursiveMode::Recursive)
-                .with_context(|| format!("watching {}", dir.display()))?;
-        }
-    }
-    let config_file = root.join("agno.toml");
-    if config_file.is_file() {
-        watcher.watch(&config_file, RecursiveMode::NonRecursive)?;
-    }
+    watcher
+        .watch(&root, RecursiveMode::Recursive)
+        .with_context(|| format!("watching {}", root.display()))?;
 
     loop {
         match rx.recv() {
@@ -91,6 +100,20 @@ pub fn dev(root: PathBuf, port: u16, drafts: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Build output, the fingerprint cache and dot-directories (`.git`, editor swap
+/// files) never trigger a rebuild.
+fn is_ignored(path: &Path, root: &Path, ignored: &[PathBuf]) -> bool {
+    if ignored.iter().any(|dir| path.starts_with(dir)) {
+        return true;
+    }
+    path.strip_prefix(root)
+        .map(|rel| {
+            rel.components()
+                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
+        })
+        .unwrap_or(false)
 }
 
 fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
@@ -150,7 +173,12 @@ fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
 fn resolve(dist: &Path, url_path: &str) -> Option<PathBuf> {
     let url_path = url_path.split(['?', '#']).next().unwrap_or("");
     let decoded = percent_decode(url_path)?;
-    if decoded.contains("..") || decoded.contains('\\') || decoded.contains('\0') {
+    if decoded.contains(['\\', '\0']) {
+        return None;
+    }
+    // Reject `..` as a path segment, not as a substring: a file called
+    // `a..b.txt` is a perfectly ordinary name.
+    if decoded.split('/').any(|segment| segment == "..") {
         return None;
     }
     let rel = decoded.trim_start_matches('/');
@@ -273,6 +301,7 @@ mod tests {
         fs::create_dir_all(dist.join("hello world")).unwrap();
         fs::write(dist.join("hello world/index.html"), "hi").unwrap();
         fs::write(dist.join("secret.txt"), "secret").unwrap();
+        fs::write(dist.join("a..b.txt"), "dots").unwrap();
 
         assert_eq!(
             resolve(&dist, "/hello%20world/"),
@@ -280,7 +309,37 @@ mod tests {
         );
         assert_eq!(resolve(&dist, "/../secret.txt"), None);
         assert_eq!(resolve(&dist, "/%2e%2e/secret.txt"), None);
+        assert_eq!(
+            resolve(&dist, "/a..b.txt"),
+            Some(dist.join("a..b.txt")),
+            "dots inside a file name are not traversal"
+        );
 
         let _ = fs::remove_dir_all(&dist);
+    }
+
+    #[test]
+    fn ignores_output_cache_and_dot_directories() {
+        let root = Path::new("/site");
+        let ignored = [root.join("dist"), root.join(".agno-cache")];
+
+        assert!(is_ignored(&root.join("dist/index.html"), root, &ignored));
+        assert!(is_ignored(
+            &root.join(".agno-cache/fingerprints.bin"),
+            root,
+            &ignored
+        ));
+        assert!(is_ignored(&root.join(".git/HEAD"), root, &ignored));
+        assert!(is_ignored(
+            &root.join("content/.hello.md.swp"),
+            root,
+            &ignored
+        ));
+        assert!(!is_ignored(
+            &root.join("content/blog/hello.md"),
+            root,
+            &ignored
+        ));
+        assert!(!is_ignored(root, root, &ignored));
     }
 }

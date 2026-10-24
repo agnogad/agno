@@ -6,6 +6,7 @@
 
 use crate::config::Config;
 use crate::content::{self, Content};
+use crate::markdown;
 use crate::render::Templates;
 use crate::site;
 use anyhow::Result;
@@ -41,6 +42,12 @@ pub fn check(root: &Path, drafts: bool) -> Result<Report> {
     }
 
     let known = known_outputs(&cfg, &content);
+
+    // Everything whose Markdown body can carry links: regular pages, the home
+    // page and section indexes. `_index.md` bodies were never scanned before,
+    // so a broken link on a landing page went unreported.
+    let bodies = bodies(&content);
+
     for page in &content.pages {
         if let Some(template) = page.template.as_deref()
             && !templates.has(template)
@@ -61,17 +68,59 @@ pub fn check(root: &Path, drafts: bool) -> Result<Report> {
                 page.source.display()
             ));
         }
+    }
 
-        let body = strip_code_fences(&page.body);
-        for (line, target) in extract_links(&body) {
-            let Some(key) = resolve_link(&page.url, &target) else {
+    // Anchors are validated after the first pass: they need the heading ids of
+    // the page they point at, and those pages are only rendered on demand.
+    let mut anchors: Vec<(String, &Path, usize, String)> = Vec::new();
+
+    for (source, url, body) in &bodies {
+        let stripped = strip_code_fences(body);
+        for (line, target) in extract_links(&stripped) {
+            let (path, anchor) = split_anchor(&target);
+            if path.is_empty() {
+                if let Some(anchor) = anchor {
+                    report.links += 1;
+                    anchors.push((site::output_rel(url), source, line, anchor.to_string()));
+                }
+                continue;
+            }
+            let Some(key) = resolve_link(url, path) else {
                 continue;
             };
             report.links += 1;
             if !known.contains(&key) {
                 report.errors.push(format!(
                     "{}:{line}: broken link {target} (resolves to /{key})",
-                    page.source.display()
+                    source.display()
+                ));
+            } else if let Some(anchor) = anchor {
+                anchors.push((key, source, line, anchor.to_string()));
+            }
+        }
+    }
+
+    if !anchors.is_empty() {
+        let mut ids: HashMap<String, HashSet<String>> = HashMap::new();
+        {
+            let wanted: HashSet<&str> = anchors.iter().map(|(key, ..)| key.as_str()).collect();
+            for (_, url, body) in &bodies {
+                let key = site::output_rel(url);
+                if wanted.contains(key.as_str()) {
+                    ids.insert(key, heading_ids(body));
+                }
+            }
+        }
+        for (key, source, line, anchor) in anchors {
+            // A link into a non-Markdown output (an image, a stylesheet) has no
+            // heading set to check against.
+            let Some(set) = ids.get(&key) else {
+                continue;
+            };
+            if !set.contains(&anchor) {
+                report.errors.push(format!(
+                    "{}:{line}: broken anchor #{anchor} (no heading or id with that name)",
+                    source.display()
                 ));
             }
         }
@@ -91,6 +140,58 @@ pub fn check(root: &Path, drafts: bool) -> Result<Report> {
     }
 
     Ok(report)
+}
+
+/// Every Markdown body that can contain links, with the URL it is served from.
+fn bodies(content: &Content) -> Vec<(&Path, &str, &str)> {
+    let mut out: Vec<(&Path, &str, &str)> =
+        Vec::with_capacity(content.pages.len() + content.sections.len() + 1);
+    for page in &content.pages {
+        out.push((&page.source, &page.url, &page.body));
+    }
+    if !content.home.body.is_empty() {
+        out.push((&content.home.source, "/", &content.home.body));
+    }
+    for section in &content.sections {
+        if !section.body.is_empty() {
+            out.push((&section.source, &section.url, &section.body));
+        }
+    }
+    out
+}
+
+/// Split a link target into its path and its `#fragment`.
+fn split_anchor(target: &str) -> (&str, Option<&str>) {
+    match target.split_once('#') {
+        Some((path, anchor)) => (path.split('?').next().unwrap_or(""), Some(anchor)),
+        None => (target.split('?').next().unwrap_or(""), None),
+    }
+}
+
+/// Every id a rendered page exposes: heading anchors plus ids written directly
+/// in the Markdown as raw HTML.
+fn heading_ids(body: &str) -> HashSet<String> {
+    let rendered = markdown::render(body, false);
+    let mut ids: HashSet<String> = rendered.anchors().iter().cloned().collect();
+    for id in raw_ids(body) {
+        ids.insert(id);
+    }
+    ids
+}
+
+fn raw_ids(body: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for (index, _) in body.match_indices("id=") {
+        let rest = &body[index + 3..];
+        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
+        let value = &rest[quote.len_utf8()..];
+        if let Some(end) = value.find(quote) {
+            ids.push(value[..end].to_string());
+        }
+    }
+    ids
 }
 
 /// Every path the build will write, in `output_rel` form.

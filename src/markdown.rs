@@ -47,6 +47,15 @@ pub struct Rendered {
     pub toc: Vec<TocEntry>,
     /// The table of contents pre-rendered as nested `<ul>` lists.
     pub toc_html: String,
+    /// Every heading anchor in document order, including the ones a
+    /// single-heading page has but that never make it into `toc`.
+    anchors: Vec<String>,
+}
+
+impl Rendered {
+    pub fn anchors(&self) -> &[String] {
+        &self.anchors
+    }
 }
 
 /// Render Markdown to HTML, collecting the summary and the table of contents.
@@ -125,12 +134,16 @@ pub fn render(input: &str, highlight: bool) -> Rendered {
     let mut html = String::with_capacity(input.len() * 3 / 2);
     html::push_html(&mut html, events.into_iter());
     let toc = build_toc(&headings);
+    let anchors: Vec<String> = headings.into_iter().map(|(_, id, _)| id).collect();
+    // A single heading is not a table of contents.
+    let toc = if anchors.len() >= 2 { toc } else { Vec::new() };
     let toc_html = render_toc(&toc);
     Rendered {
         html,
         summary,
         toc,
         toc_html,
+        anchors,
     }
 }
 
@@ -302,6 +315,16 @@ pub fn escape_html(input: &str) -> String {
 
 /// Append `input` to `out`, escaping the five HTML-significant characters.
 pub fn push_escaped(out: &mut String, input: &str) {
+    // Most strings need no escaping at all; a byte scan decides that far
+    // cheaper than the char-by-char loop below.
+    if !input
+        .as_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        out.push_str(input);
+        return;
+    }
     for c in input.chars() {
         match c {
             '&' => out.push_str("&amp;"),
@@ -356,6 +379,15 @@ mod tests {
         let rendered = render("## Install {#how}\n", false);
         assert!(rendered.html.contains("<h2 id=\"how\">"));
         assert!(rendered.html.contains("Install"));
+    }
+
+    #[test]
+    fn a_single_heading_is_not_a_table_of_contents() {
+        let rendered = render("# Only One\n\nBody.\n", false);
+        assert!(rendered.toc.is_empty());
+        assert!(rendered.toc_html.is_empty());
+        assert_eq!(rendered.anchors(), ["only-one"]);
+        assert!(rendered.html.contains("<h1 id=\"only-one\">"));
     }
 
     #[test]
