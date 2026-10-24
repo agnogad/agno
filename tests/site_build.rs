@@ -622,6 +622,49 @@ fn templates_can_read_the_updated_date_and_sections() {
 }
 
 #[test]
+fn list_pages_expose_frontmatter_extra() {
+    let root = fixture("list-extra");
+    fs::write(
+        root.join("content/_index.md"),
+        "+++\ntitle = \"Home\"\nhero = \"home.png\"\n+++\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\nhero = \"blog.png\"\n+++\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/index.html"),
+        "hero={{ page.extra.hero }}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("templates/section.html"),
+        "hero={{ page.extra.hero }}",
+    )
+    .unwrap();
+
+    clean_build(&root);
+    assert_eq!(text(&root.join("dist/index.html")), "hero=home.png");
+    let section = root.join("dist/blog/index.html");
+    assert_eq!(text(&section), "hero=blog.png");
+    // Tag pages also use section.html; their extra object is simply empty.
+    assert_eq!(text(&root.join("dist/tags/rust/index.html")), "hero=");
+
+    let before = modified(&section);
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\nhero = \"blog-2.png\"\n+++\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+    assert_eq!(text(&section), "hero=blog-2.png");
+    assert_ne!(before, modified(&section), "extra change was not rendered");
+}
+
+#[test]
 fn aliases_emit_redirect_pages() {
     let root = fixture("aliases");
     fs::write(
@@ -731,27 +774,28 @@ fn check_validates_anchor_targets() {
     fs::write(
         root.join("content/blog/anchors.md"),
         "+++\ntitle = \"Anchors\"\ndate = 2024-01-01\n+++\n\n## Real Heading\n\n\
-         [ok](#real-heading)\n\n[bad](#nope)\n\n[good](/blog/target/#deep-section)\n\n\
-         [cross](/blog/target/#missing)\n",
+         <span id=\"raw-target\"></span>\n\n\
+         [ok](#real-heading)\n\n[raw](#raw-target)\n\n[bad](#nope)\n\n\
+         [code](#fake-id)\n\n`<div id=\"fake-id\">`\n\n\
+         [fenced](#fenced-id)\n\n```html\n<span id=\"fenced-id\"></span>\n```\n\n\
+         [good](/blog/target/#deep-section)\n\n[cross](/blog/target/#missing)\n",
     )
     .unwrap();
 
     let report = agno::check::check(&root, false).unwrap();
+    for anchor in ["#nope", "#missing", "#fake-id", "#fenced-id"] {
+        assert!(
+            report.errors.iter().any(|error| error.contains(anchor)),
+            "{anchor} not reported: {:?}",
+            report.errors
+        );
+    }
     assert!(
-        report.errors.iter().any(|error| error.contains("#nope")),
-        "{:?}",
-        report.errors
-    );
-    assert!(
-        report.errors.iter().any(|error| error.contains("#missing")),
-        "{:?}",
-        report.errors
-    );
-    assert!(
-        !report
-            .errors
-            .iter()
-            .any(|error| error.contains("#real-heading") || error.contains("#deep-section")),
+        !report.errors.iter().any(|error| {
+            error.contains("#real-heading")
+                || error.contains("#raw-target")
+                || error.contains("#deep-section")
+        }),
         "valid anchors were reported: {:?}",
         report.errors
     );

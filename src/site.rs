@@ -118,6 +118,7 @@ struct ListView<'a> {
     url: &'a str,
     description: &'a str,
     content: &'a str,
+    extra: &'a Json,
     pages: Vec<CardView<'a>>,
     paginator: Option<&'a PagerView>,
 }
@@ -129,6 +130,7 @@ struct ListSpec<'a> {
     url: String,
     description: &'a str,
     content: &'a str,
+    extra: Json,
     pages: Vec<&'a Page>,
     paginator: Option<PagerView>,
     candidates: &'static [&'static str],
@@ -462,6 +464,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
         url: "/".to_string(),
         description: &content.home.description,
         content: &content.home.html,
+        extra: content.home.extra.clone(),
         pages: content.pages.iter().collect(),
         paginator: None,
         candidates: &["index.html"],
@@ -476,6 +479,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                 url: section.url.clone(),
                 description: &section.description,
                 content: &section.content,
+                extra: section.extra.clone(),
                 pages: all.to_vec(),
                 paginator: None,
                 candidates: &["section.html"],
@@ -501,6 +505,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                 url,
                 description: &section.description,
                 content: &section.content,
+                extra: section.extra.clone(),
                 pages: chunk.to_vec(),
                 paginator: Some(PagerView {
                     current,
@@ -523,6 +528,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
             url: tag.url.clone(),
             description: "",
             content: "",
+            extra: Json::Object(Default::default()),
             pages: index.tag(&tag.key).to_vec(),
             paginator: None,
             candidates: &["tag.html", "section.html"],
@@ -533,6 +539,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
         url: "/404.html".to_string(),
         description: "",
         content: "",
+        extra: Json::Object(Default::default()),
         pages: Vec::new(),
         paginator: None,
         candidates: &["404.html"],
@@ -636,6 +643,7 @@ fn render_list(
         url: list.url.as_str(),
         description: list.description,
         content: list.content,
+        extra: &list.extra,
         pages: cards,
         paginator: list.paginator.as_ref(),
     };
@@ -663,6 +671,10 @@ fn list_key(
     hash = cache::fingerprint(hash, list.title.as_bytes());
     hash = cache::fingerprint(hash, list.description.as_bytes());
     hash = cache::fingerprint(hash, list.content.as_bytes());
+    // Section extras are template data that no other fingerprint covers.
+    if let Ok(extra) = serde_json::to_string(&list.extra) {
+        hash = cache::fingerprint(hash, extra.as_bytes());
+    }
     for page in &list.pages {
         // Each card carries a fingerprint of the fields it renders, computed
         // once per page, so a list hashes two words per card instead of every

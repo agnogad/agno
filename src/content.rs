@@ -61,6 +61,8 @@ pub struct Listing {
     pub source: PathBuf,
     /// Split this section's pages into `/section/page/N/` chunks of this size.
     pub paginate_by: Option<usize>,
+    /// Remaining frontmatter, exposed to list templates as `page.extra`.
+    pub extra: Value,
 }
 
 pub struct Content {
@@ -111,6 +113,7 @@ impl Listing {
             body_line: 0,
             source: PathBuf::new(),
             paginate_by: None,
+            extra: Value::Object(Default::default()),
         }
     }
 }
@@ -201,6 +204,7 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
             body_line: 0,
             source: PathBuf::new(),
             paginate_by: None,
+            extra: Value::Object(Default::default()),
         })
         .collect();
 
@@ -331,6 +335,7 @@ fn load_listing(
         body: body.to_string(),
         source: path.clone(),
         paginate_by: field_usize(&fm, "paginate_by").filter(|size| *size > 0),
+        extra: fm,
     })
 }
 

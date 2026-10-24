@@ -157,10 +157,15 @@ fn comment_end(input: &str, index: usize) -> Option<usize> {
 /// closing tag.
 fn raw_element_end(input: &str, index: usize) -> Option<usize> {
     let rest = input.get(index..)?;
-    let head = rest.get(..12).unwrap_or(rest).to_ascii_lowercase();
-    let name = RAW_ELEMENTS.iter().find(|name| {
-        head.starts_with(&format!("<{name}"))
-            && head[1 + name.len()..].starts_with([' ', '>', '\n', '\t', '\r'])
+    // Compare against the source instead of lowercasing a fixed-size prefix:
+    // this runs for every `<` in the document, and the old version allocated a
+    // `String` per candidate element.
+    let name = RAW_ELEMENTS.iter().copied().find(|name| {
+        rest.get(1..1 + name.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(name))
+            && rest
+                .get(1 + name.len()..)
+                .is_some_and(|tail| tail.starts_with([' ', '>', '\n', '\t', '\r']))
     })?;
     match find_closing(input, index, name) {
         Some(start) => Some(
@@ -205,6 +210,12 @@ mod tests {
     #[test]
     fn preserves_pre_and_script_content() {
         let input = "<pre>\n  keep\n    this\n</pre><script>\n  let a = 1;\n</script>";
+        assert_eq!(minify_html(input), input);
+    }
+
+    #[test]
+    fn preserves_raw_elements_with_attributes_and_case() {
+        let input = "<textarea class=\"x\">  keep  </textarea><PRE data-x=\"1\">\n a\n</PRE>";
         assert_eq!(minify_html(input), input);
     }
 

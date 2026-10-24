@@ -132,7 +132,18 @@ fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
         }
 
         match resolve(&dist, path) {
-            Some(file) if file.extension().is_some_and(|e| e == "html") => {
+            Some(Target::Redirect(location)) => {
+                // Preserve the query string: `/blog?x=1` → `/blog/?x=1`.
+                let location = match url.split_once('?') {
+                    Some((_, query)) => format!("{location}?{query}"),
+                    None => location,
+                };
+                let response = Response::empty(301)
+                    .with_header(header("Location", &location))
+                    .with_header(header("Cache-Control", "no-store"));
+                let _ = request.respond(response);
+            }
+            Some(Target::File(file)) if file.extension().is_some_and(|e| e == "html") => {
                 match std::fs::read_to_string(&file) {
                     Ok(html) => respond(request, 200, "text/html; charset=utf-8", inject(&html)),
                     Err(_) => respond(
@@ -143,7 +154,7 @@ fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
                     ),
                 }
             }
-            Some(file) => match std::fs::read(&file) {
+            Some(Target::File(file)) => match std::fs::read(&file) {
                 Ok(bytes) => {
                     let ctype = content_type(&file);
                     let response = Response::from_data(bytes)
@@ -170,7 +181,13 @@ fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
     }
 }
 
-fn resolve(dist: &Path, url_path: &str) -> Option<PathBuf> {
+#[derive(Debug, PartialEq, Eq)]
+enum Target {
+    File(PathBuf),
+    Redirect(String),
+}
+
+fn resolve(dist: &Path, url_path: &str) -> Option<Target> {
     let url_path = url_path.split(['?', '#']).next().unwrap_or("");
     let decoded = site::percent_decode(url_path)?;
     if decoded.contains(['\\', '\0']) {
@@ -184,15 +201,16 @@ fn resolve(dist: &Path, url_path: &str) -> Option<PathBuf> {
     let rel = decoded.trim_start_matches('/');
     let base = dist.join(rel);
     if base.is_dir() {
+        // Browsers resolve relative links against the directory URL, so a
+        // request for `/blog` must move to `/blog/` before the page is served.
+        if !decoded.ends_with('/') {
+            return Some(Target::Redirect(format!("{decoded}/")));
+        }
         let index = base.join("index.html");
-        return index.is_file().then_some(index);
+        return index.is_file().then_some(Target::File(index));
     }
     if base.is_file() {
-        return Some(base);
-    }
-    if !rel.rsplit('/').next().unwrap_or("").contains('.') {
-        let index = base.join("index.html");
-        return index.is_file().then_some(index);
+        return Some(Target::File(base));
     }
     None
 }
@@ -225,8 +243,9 @@ fn content_type(path: &Path) -> &'static str {
         "html" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
+        "json" | "map" => "application/json; charset=utf-8",
         "xml" => "application/xml; charset=utf-8",
+        "wasm" => "application/wasm",
         "txt" => "text/plain; charset=utf-8",
         "svg" => "image/svg+xml",
         "png" => "image/png",
@@ -252,6 +271,15 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn serves_webassembly_and_source_maps() {
+        assert_eq!(content_type(Path::new("app.wasm")), "application/wasm");
+        assert_eq!(
+            content_type(Path::new("app.js.map")),
+            "application/json; charset=utf-8"
+        );
+    }
+
+    #[test]
     fn percent_decode_handles_spaces_and_rejects_traversal() {
         assert_eq!(
             site::percent_decode("/hello%20world/").as_deref(),
@@ -275,13 +303,18 @@ mod tests {
 
         assert_eq!(
             resolve(&dist, "/hello%20world/"),
-            Some(dist.join("hello world/index.html"))
+            Some(Target::File(dist.join("hello world/index.html")))
+        );
+        assert_eq!(
+            resolve(&dist, "/hello%20world"),
+            Some(Target::Redirect("/hello world/".into())),
+            "a directory without a trailing slash redirects"
         );
         assert_eq!(resolve(&dist, "/../secret.txt"), None);
         assert_eq!(resolve(&dist, "/%2e%2e/secret.txt"), None);
         assert_eq!(
             resolve(&dist, "/a..b.txt"),
-            Some(dist.join("a..b.txt")),
+            Some(Target::File(dist.join("a..b.txt"))),
             "dots inside a file name are not traversal"
         );
 
