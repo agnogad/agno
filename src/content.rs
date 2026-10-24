@@ -37,6 +37,9 @@ pub struct Page {
     /// Markdown body, kept until the page is rendered so unchanged pages can
     /// skip parsing and highlighting entirely.
     pub body: String,
+    /// Source line the body starts on; `body` is stored with frontmatter and
+    /// leading blank lines removed, so link reports need this offset.
+    pub body_line: usize,
     pub html: String,
     /// Fingerprint of the page source; see [`crate::cache`].
     pub content_key: u64,
@@ -52,6 +55,8 @@ pub struct Listing {
     pub content: String,
     /// Markdown body of the section's `_index.md`, kept for `agno check`.
     pub body: String,
+    /// Source line the body starts on.
+    pub body_line: usize,
     /// Source file behind this listing, empty for synthesized sections.
     pub source: PathBuf,
     /// Split this section's pages into `/section/page/N/` chunks of this size.
@@ -63,6 +68,16 @@ pub struct Content {
     pub pages: Vec<Page>,
     pub sections: Vec<Listing>,
     pub tags: Vec<Listing>,
+    /// Files that live next to a page bundle's `index.md` and are copied to
+    /// the bundle's output directory.
+    pub assets: Vec<Asset>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Asset {
+    pub source: PathBuf,
+    /// URL the asset is served from, e.g. `/blog/photo/photo.jpg`.
+    pub url: String,
 }
 
 impl Page {
@@ -93,6 +108,7 @@ impl Listing {
             description: String::new(),
             content: String::new(),
             body: String::new(),
+            body_line: 0,
             source: PathBuf::new(),
             paginate_by: None,
         }
@@ -103,6 +119,9 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
     let root = cfg.content();
     let mut page_paths: Vec<PathBuf> = Vec::new();
     let mut index_paths: HashMap<String, PathBuf> = HashMap::new();
+    // Non-Markdown files are only emitted when they sit inside a page bundle,
+    // but they have to be collected during the same walk that finds `index.md`.
+    let mut asset_paths: Vec<(String, PathBuf)> = Vec::new();
 
     if root.is_dir() {
         for entry in WalkDir::new(&root)
@@ -114,19 +133,20 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if !is_markdown(&name) {
-                continue;
-            }
             let path = entry.path().to_path_buf();
             let rel_dir = path
                 .parent()
                 .and_then(|p| p.strip_prefix(&root).ok())
                 .map(rel_string)
                 .unwrap_or_default();
-            if is_index(&name) {
-                index_paths.insert(rel_dir, path);
-            } else if !name.starts_with('_') {
-                page_paths.push(path);
+            if is_markdown(&name) {
+                if is_index(&name) {
+                    index_paths.insert(rel_dir, path);
+                } else if !name.starts_with('_') {
+                    page_paths.push(path);
+                }
+            } else {
+                asset_paths.push((rel_dir, path));
             }
         }
     }
@@ -141,18 +161,20 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
 
     let home = load_home(cfg, &index_paths)?;
 
+    // Every directory that directly contains content is a section, at any
+    // depth. Pages report their parent directory as `section`, and an
+    // `_index.md` can add a section landing page without child pages.
     let mut section_keys: BTreeSet<String> =
         pages.iter().filter_map(|p| p.section.clone()).collect();
-    // A section landing page can exist without any child pages.
     for key in index_paths.keys() {
-        if !key.is_empty() && !key.contains('/') {
+        if !key.is_empty() {
             section_keys.insert(key.clone());
         }
     }
     let sections = section_keys
         .iter()
         .map(|key| {
-            let url = format!("/{}/", url_segment(key));
+            let url = section_url(key);
             load_listing(cfg, &index_paths, key, &url)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -176,17 +198,88 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
             description: String::new(),
             content: String::new(),
             body: String::new(),
+            body_line: 0,
             source: PathBuf::new(),
             paginate_by: None,
         })
         .collect();
+
+    let assets = bundle_assets(&root, pages.iter(), asset_paths);
 
     Ok(Content {
         home,
         pages,
         sections,
         tags,
+        assets,
     })
+}
+
+/// Map each page bundle directory to the URL of its page, then attach every
+/// non-Markdown file below that directory to the same output path.
+fn bundle_assets<'a>(
+    root: &Path,
+    pages: impl Iterator<Item = &'a Page>,
+    asset_paths: Vec<(String, PathBuf)>,
+) -> Vec<Asset> {
+    let bundle_urls: HashMap<String, String> = pages
+        .filter_map(|page| {
+            let name = page.source.file_name()?.to_str()?;
+            if !is_bundle_index(name) {
+                return None;
+            }
+            let dir = page
+                .source
+                .parent()?
+                .strip_prefix(root)
+                .ok()
+                .map(rel_string)?;
+            Some((dir, page.url.clone()))
+        })
+        .collect();
+    if bundle_urls.is_empty() {
+        return Vec::new();
+    }
+
+    let mut assets = Vec::new();
+    for (rel_dir, source) in asset_paths {
+        let Some((bundle_dir, url)) = nearest_bundle(&rel_dir, &bundle_urls) else {
+            continue;
+        };
+        let rel = source
+            .strip_prefix(root)
+            .map(rel_string)
+            .unwrap_or_default();
+        let rel = rel
+            .strip_prefix(bundle_dir)
+            .unwrap_or(&rel)
+            .trim_start_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        assets.push(Asset {
+            source,
+            url: format!("{}/{rel}", url.trim_end_matches('/')),
+        });
+    }
+    assets.sort_by(|a, b| a.url.cmp(&b.url));
+    assets
+}
+
+fn nearest_bundle<'a>(
+    rel_dir: &str,
+    bundle_urls: &'a HashMap<String, String>,
+) -> Option<(&'a str, &'a str)> {
+    let mut dir = rel_dir;
+    loop {
+        if let Some((key, url)) = bundle_urls.get_key_value(dir) {
+            return Some((key.as_str(), url.as_str()));
+        }
+        match dir.rsplit_once('/') {
+            Some((head, _)) => dir = head,
+            None => return None,
+        }
+    }
 }
 
 fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<Page> {
@@ -209,6 +302,7 @@ fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<Pag
     page.summary = field_str(&fm, "summary").unwrap_or(rendered.summary);
     page.extra = fm;
     page.html = rendered.html;
+    page.body_line = body_start_line(&src, body);
     page.body = body.to_string();
     Ok(page)
 }
@@ -220,7 +314,7 @@ fn load_listing(
     url: &str,
 ) -> Result<Listing> {
     let Some(path) = index_paths.get(key) else {
-        return Ok(Listing::empty(key, &humanize(key), url));
+        return Ok(Listing::empty(key, &section_title(key), url));
     };
     let src =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -229,10 +323,11 @@ fn load_listing(
     let rendered = markdown::render(body, cfg.highlight);
     Ok(Listing {
         key: key.to_string(),
-        title: field_str(&fm, "title").unwrap_or_else(|| humanize(key)),
+        title: field_str(&fm, "title").unwrap_or_else(|| section_title(key)),
         url: url.to_string(),
         description: field_str(&fm, "description").unwrap_or_default(),
         content: rendered.html,
+        body_line: body_start_line(&src, body),
         body: body.to_string(),
         source: path.clone(),
         paginate_by: field_usize(&fm, "paginate_by").filter(|size| *size > 0),
@@ -353,14 +448,17 @@ fn load_page(
     let summary = field_str(&fm, "summary").unwrap_or_default();
     let description = field_str(&fm, "description").unwrap_or_default();
 
+    // A bundle's page lives at `/dir/`, so its section is the bundle's parent
+    // directory; a regular page belongs to the directory it sits in.
     let section_source = if is_bundle_index {
-        &parent
+        parent.rsplit_once('/').map(|(head, _)| head).unwrap_or("")
     } else {
-        &rel_no_ext
+        rel_no_ext
+            .rsplit_once('/')
+            .map(|(head, _)| head)
+            .unwrap_or("")
     };
-    let section = section_source
-        .split_once('/')
-        .map(|(first, _)| first.to_string());
+    let section = (!section_source.is_empty()).then(|| section_source.to_string());
 
     // An alias that points at the page itself, or repeats an earlier one, is a
     // no-op rather than a conflict: it would otherwise fail the build with a
@@ -394,6 +492,7 @@ fn load_page(
         aliases: deduped,
         template: field_str(&fm, "template"),
         extra: fm,
+        body_line: body_start_line(&src, body),
         body: body.to_string(),
         html: String::new(),
         content_key: crate::cache::fingerprint(0, src.as_bytes()),
@@ -424,6 +523,7 @@ fn empty_page(title: String, url: String) -> Page {
         aliases: Vec::new(),
         template: None,
         extra: Value::Object(Default::default()),
+        body_line: 0,
         body: String::new(),
         html: String::new(),
         content_key: 0,
@@ -443,11 +543,29 @@ fn is_index(name: &str) -> bool {
     name == "_index.md" || name == "_index.markdown"
 }
 
-fn rel_string(path: &Path) -> String {
-    path.components()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+fn is_bundle_index(name: &str) -> bool {
+    name == "index.md" || name == "index.markdown"
+}
+
+/// The source line that `body` starts on. `split_frontmatter` returns a
+/// subslice of the file, so the prefix length gives the line offset.
+fn body_start_line(src: &str, body: &str) -> usize {
+    let offset = body.as_ptr() as usize - src.as_ptr() as usize;
+    if offset > src.len() {
+        return 1;
+    }
+    1 + src[..offset].bytes().filter(|byte| *byte == b'\n').count()
+}
+
+pub fn rel_string(path: &Path) -> String {
+    let mut out = String::with_capacity(path.as_os_str().len() + 8);
+    for component in path.components() {
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(&component.as_os_str().to_string_lossy());
+    }
+    out
 }
 
 pub fn split_frontmatter(src: &str) -> Result<(Value, &str)> {
@@ -667,6 +785,20 @@ fn url_segment(input: &str) -> String {
     } else {
         slug
     }
+}
+
+/// `/docs/guide/` for a nested section key `docs/guide`.
+fn section_url(key: &str) -> String {
+    let mut url = String::from("/");
+    for segment in key.split('/').filter(|segment| !segment.is_empty()) {
+        url.push_str(&url_segment(segment));
+        url.push('/');
+    }
+    url
+}
+
+fn section_title(key: &str) -> String {
+    humanize(key.rsplit('/').next().unwrap_or(key))
 }
 
 pub fn humanize(input: &str) -> String {

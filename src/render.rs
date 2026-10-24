@@ -11,6 +11,9 @@ pub struct Templates {
 impl Templates {
     pub fn load(dir: &Path) -> Result<Self> {
         let mut env = Environment::new();
+        // Templates are loaded once per build, so minijinja's per-render
+        // metadata check for edited sources buys nothing and costs syscalls.
+        env.set_auto_reload(false);
         env.set_auto_escape_callback(|_| AutoEscape::Html);
         env.add_filter("slugify", |value: String| slugify(&value));
         env.add_filter("starts_with", |value: String, prefix: String| {

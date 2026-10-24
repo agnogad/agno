@@ -58,8 +58,9 @@ impl Rendered {
     }
 }
 
-/// Render Markdown to HTML, collecting the summary and the table of contents.
-pub fn render(input: &str, highlight: bool) -> Rendered {
+/// The Markdown extensions `render` enables. Shared with `agno check` so link
+/// discovery parses exactly what the renderer does.
+pub fn options() -> Options {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_FOOTNOTES);
@@ -67,6 +68,12 @@ pub fn render(input: &str, highlight: bool) -> Rendered {
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_SMART_PUNCTUATION);
     opts.insert(Options::ENABLE_HEADING_ATTRIBUTES);
+    opts
+}
+
+/// Render Markdown to HTML, collecting the summary and the table of contents.
+pub fn render(input: &str, highlight: bool) -> Rendered {
+    let opts = options();
 
     let mut events = Vec::with_capacity(input.len() / 24 + 8);
     let mut headings: Vec<(u8, String, String)> = Vec::new();
@@ -156,7 +163,20 @@ fn heading_text(events: &[Event<'_>]) -> String {
             _ => {}
         }
     }
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    collapse_whitespace(&text)
+}
+
+/// Collapse runs of whitespace to single spaces without the intermediate
+/// `Vec<&str>` that `split_whitespace().collect::<Vec<_>>().join(" ")` builds.
+fn collapse_whitespace(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for word in input.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 fn unique_id(used: &mut HashMap<String, usize>, base: String) -> String {
@@ -250,7 +270,7 @@ fn first_paragraph(events: &[Event<'_>]) -> String {
 }
 
 fn truncate(input: &str, max_chars: usize) -> String {
-    let collapsed = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(input);
     if collapsed.chars().count() <= max_chars {
         return collapsed;
     }

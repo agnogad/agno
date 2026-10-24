@@ -915,3 +915,72 @@ fn cards_use_the_rendered_summary_when_no_description_is_set() {
     let home = text(&root.join("dist/index.html"));
     assert!(home.contains("Auto summary sentence here."), "{home}");
 }
+
+#[test]
+fn nested_sections_render_a_listing_for_their_own_directory() {
+    let root = fixture("nested-sections");
+    fs::create_dir_all(root.join("content/docs/guide")).unwrap();
+    fs::write(
+        root.join("content/docs/guide/_index.md"),
+        "+++\ntitle = \"Guide\"\n+++\n\nGuide landing.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/docs/guide/one.md"),
+        "+++\ntitle = \"One\"\ndate = 2024-01-01\n+++\n\nFirst guide page.\n",
+    )
+    .unwrap();
+
+    clean_build(&root);
+
+    let guide = text(&root.join("dist/docs/guide/index.html"));
+    assert!(guide.contains("Guide landing."), "{guide}");
+    assert!(guide.contains("One"), "{guide}");
+    assert!(
+        !root.join("dist/docs/index.html").exists(),
+        "a directory without _index.md must not gain a listing"
+    );
+}
+
+#[test]
+fn page_bundle_assets_are_copied_and_checked() {
+    let root = fixture("bundle-assets");
+    fs::create_dir_all(root.join("content/blog/photo")).unwrap();
+    fs::write(
+        root.join("content/blog/photo/index.md"),
+        "+++\ntitle = \"Photo\"\ndate = 2024-01-01\n+++\n\n![shot](photo.jpg)\n",
+    )
+    .unwrap();
+    fs::write(root.join("content/blog/photo/photo.jpg"), b"jpeg-bytes").unwrap();
+
+    clean_build(&root);
+    assert_eq!(
+        fs::read(root.join("dist/blog/photo/photo.jpg")).unwrap(),
+        b"jpeg-bytes"
+    );
+    let report = agno::check::check(&root, false).unwrap();
+    assert!(report.ok(), "{:?}", report.errors);
+
+    fs::remove_file(root.join("content/blog/photo/photo.jpg")).unwrap();
+    build_incremental(&root);
+    assert!(
+        !root.join("dist/blog/photo/photo.jpg").exists(),
+        "a removed bundle asset must be swept from the output"
+    );
+}
+
+#[test]
+fn check_reports_source_lines_and_reference_links() {
+    let root = fixture("check-lines");
+    fs::write(
+        root.join("content/blog/lines.md"),
+        "+++\ntitle = \"Lines\"\ndate = 2024-01-01\n+++\n\n![shot](/nope.png)\n\n\
+         [ref][missing]\n\n[missing]: /also-nope/\n",
+    )
+    .unwrap();
+
+    let report = agno::check::check(&root, false).unwrap();
+    let errors = report.errors.join("\n");
+    assert!(errors.contains("lines.md:6"), "{errors}");
+    assert!(errors.contains("lines.md:8"), "{errors}");
+}

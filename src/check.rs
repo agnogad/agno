@@ -10,6 +10,7 @@ use crate::markdown;
 use crate::render::Templates;
 use crate::site;
 use anyhow::Result;
+use pulldown_cmark::{Event, Parser, Tag};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -74,9 +75,9 @@ pub fn check(root: &Path, drafts: bool) -> Result<Report> {
     // the page they point at, and those pages are only rendered on demand.
     let mut anchors: Vec<(String, &Path, usize, String)> = Vec::new();
 
-    for (source, url, body) in &bodies {
-        let stripped = strip_code_fences(body);
-        for (line, target) in extract_links(&stripped) {
+    for (source, url, body, body_line) in &bodies {
+        for (line, target) in extract_links(body) {
+            let line = line + body_line - 1;
             let (path, anchor) = split_anchor(&target);
             if path.is_empty() {
                 if let Some(anchor) = anchor {
@@ -104,7 +105,7 @@ pub fn check(root: &Path, drafts: bool) -> Result<Report> {
         let mut ids: HashMap<String, HashSet<String>> = HashMap::new();
         {
             let wanted: HashSet<&str> = anchors.iter().map(|(key, ..)| key.as_str()).collect();
-            for (_, url, body) in &bodies {
+            for (_, url, body, _) in &bodies {
                 let key = site::output_rel(url);
                 if wanted.contains(key.as_str()) {
                     ids.insert(key, heading_ids(body));
@@ -142,19 +143,30 @@ pub fn check(root: &Path, drafts: bool) -> Result<Report> {
     Ok(report)
 }
 
-/// Every Markdown body that can contain links, with the URL it is served from.
-fn bodies(content: &Content) -> Vec<(&Path, &str, &str)> {
-    let mut out: Vec<(&Path, &str, &str)> =
+/// Every Markdown body that can contain links, with the URL it is served from
+/// and the source line the body starts on.
+fn bodies(content: &Content) -> Vec<(&Path, &str, &str, usize)> {
+    let mut out: Vec<(&Path, &str, &str, usize)> =
         Vec::with_capacity(content.pages.len() + content.sections.len() + 1);
     for page in &content.pages {
-        out.push((&page.source, &page.url, &page.body));
+        out.push((&page.source, &page.url, &page.body, page.body_line));
     }
     if !content.home.body.is_empty() {
-        out.push((&content.home.source, "/", &content.home.body));
+        out.push((
+            &content.home.source,
+            "/",
+            &content.home.body,
+            content.home.body_line,
+        ));
     }
     for section in &content.sections {
         if !section.body.is_empty() {
-            out.push((&section.source, &section.url, &section.body));
+            out.push((
+                &section.source,
+                &section.url,
+                &section.body,
+                section.body_line,
+            ));
         }
     }
     out
@@ -173,7 +185,7 @@ fn split_anchor(target: &str) -> (&str, Option<&str>) {
 fn heading_ids(body: &str) -> HashSet<String> {
     let rendered = markdown::render(body, false);
     let mut ids: HashSet<String> = rendered.anchors().iter().cloned().collect();
-    for id in raw_ids(body) {
+    for id in raw_ids(&strip_code_fences(body)) {
         ids.insert(id);
     }
     ids
@@ -221,6 +233,9 @@ fn known_outputs(cfg: &Config, content: &Content) -> HashSet<String> {
     }
     for tag in &content.tags {
         add(&tag.url);
+    }
+    for asset in &content.assets {
+        add(&asset.url);
     }
 
     let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -337,45 +352,24 @@ fn strip_code_fences(body: &str) -> String {
     out
 }
 
-/// Collect inline Markdown link and image targets with their line numbers.
+/// Collect Markdown link and image targets with their body-relative line
+/// numbers. Parsing instead of scanning means reference-style links resolve and
+/// links written inside inline code are not mistaken for real ones.
 fn extract_links(body: &str) -> Vec<(usize, String)> {
-    let bytes = body.as_bytes();
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(body.match_indices('\n').map(|(index, _)| index + 1))
+        .collect();
     let mut links = Vec::new();
-    let mut line = 1;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\n' {
-            line += 1;
-            i += 1;
+    for (event, range) in Parser::new_ext(body, markdown::options()).into_offset_iter() {
+        let target = match event {
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => dest_url,
+            _ => continue,
+        };
+        if target.is_empty() {
             continue;
         }
-        if bytes[i] == b']' && bytes.get(i + 1) == Some(&b'(') {
-            let start = i + 2;
-            let mut end = start;
-            let mut depth = 0usize;
-            while end < bytes.len() {
-                match bytes[end] {
-                    b'\n' => break,
-                    b'(' => depth += 1,
-                    b')' if depth == 0 => break,
-                    b')' => depth -= 1,
-                    _ => {}
-                }
-                end += 1;
-            }
-            let raw = &body[start..end];
-            let target = raw
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_matches(['<', '>']);
-            if !target.is_empty() {
-                links.push((line, target.to_string()));
-            }
-            i = end;
-            continue;
-        }
-        i += 1;
+        let line = line_starts.partition_point(|&start| start <= range.start);
+        links.push((line, target.to_string()));
     }
     links
 }
@@ -424,8 +418,22 @@ mod tests {
     #[test]
     fn ignores_links_inside_code_fences() {
         let body = "```\n[a](/nope/)\n```\n\n[b](/yes/)\n";
-        let links = extract_links(&strip_code_fences(body));
+        let links = extract_links(body);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].1, "/yes/");
+    }
+
+    #[test]
+    fn resolves_reference_style_links_and_ignores_inline_code() {
+        let body = "[ref][target] and `[inline](/nope/)`\n\n[target]: /real/\n";
+        let links = extract_links(body);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0], (1, "/real/".to_string()));
+    }
+
+    #[test]
+    fn link_lines_are_body_relative() {
+        let body = "intro\n\n![alt](/image.png)\n";
+        assert_eq!(extract_links(body), [(3, "/image.png".to_string())]);
     }
 }

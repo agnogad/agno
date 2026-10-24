@@ -100,9 +100,6 @@ struct CardView<'a> {
     summary: &'a str,
     tags: &'a [String],
     section: Option<&'a str>,
-    /// Hash of everything this card displays, used to key the list cache.
-    #[serde(skip)]
-    key: u64,
 }
 
 #[derive(Serialize)]
@@ -118,11 +115,23 @@ struct SearchEntry<'a> {
 #[derive(Serialize)]
 struct ListView<'a> {
     title: &'a str,
-    url: String,
+    url: &'a str,
     description: &'a str,
     content: &'a str,
     pages: Vec<CardView<'a>>,
+    paginator: Option<&'a PagerView>,
+}
+
+/// A list before its cards are materialised. Keeping page references here lets
+/// an unchanged list be fingerprinted without allocating a `CardView` per page.
+struct ListSpec<'a> {
+    title: &'a str,
+    url: String,
+    description: &'a str,
+    content: &'a str,
+    pages: Vec<&'a Page>,
     paginator: Option<PagerView>,
+    candidates: &'static [&'static str],
 }
 
 #[derive(Serialize, Clone)]
@@ -230,6 +239,17 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let static_files = static_files(&cfg)?;
     let static_paths = static_rels(&cfg, &static_files)?;
     let has_static_style = static_paths.iter().any(|path| path == "style.css");
+    // Static files and page bundle assets are copied in parallel, so the same
+    // relative path from both sources would win nondeterministically.
+    for asset in &content.assets {
+        let rel = output_rel(&asset.url);
+        if static_paths.contains(&rel) {
+            bail!(
+                "page bundle asset {} collides with static file {rel}",
+                asset.source.display()
+            );
+        }
+    }
     // Read the previous manifest once: stale cleanup and the final write both
     // need it, and it doubles as the "did anything change?" check below.
     let previous = if opts.clean {
@@ -286,35 +306,48 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         })
         .collect();
 
-    let lists = build_lists(&content, &index, &summaries)?;
-    expected.extend(lists.iter().map(|(list, _)| output_rel(&list.url)));
+    // A card's fingerprint is identical in every list it appears in, so it is
+    // computed once here instead of once per list.
+    let card_keys: HashMap<&str, u64> = content
+        .pages
+        .iter()
+        .map(|page| {
+            let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
+            (page.url.as_str(), card_key(page, summary))
+        })
+        .collect();
+
+    let lists = build_lists(&content, &index);
+    expected.extend(lists.iter().map(|list| output_rel(&list.url)));
 
     let phase = Instant::now();
-    let mut list_names: Vec<String> = Vec::with_capacity(lists.len());
-    for (list, candidates) in &lists {
-        list_names.push(
-            templates.first(candidates).with_context(|| {
-                format!("no template found for {} among {candidates:?}", list.url)
-            })?,
-        );
-    }
+    let list_names: Vec<String> = lists
+        .iter()
+        .map(|list| {
+            templates.first(list.candidates).with_context(|| {
+                format!(
+                    "no template found for {} among {:?}",
+                    list.url, list.candidates
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let list_keys: Vec<u64> = lists
         .iter()
         .zip(&list_names)
-        .map(|((list, _), name)| list_key(header, name, list))
+        .map(|(list, name)| list_key(header, name, list, &card_keys))
         .collect();
     let list_rendered: Vec<bool> = lists
         .par_iter()
         .zip(list_names.par_iter())
         .zip(list_keys.par_iter())
         .map(|((list, name), key)| -> Result<bool> {
-            let (list, _) = list;
             if fingerprints.summary(&list.url, *key).is_some()
                 && output_path(&cfg, &list.url).is_file()
             {
                 return Ok(false);
             }
-            render_list(&cfg, &templates, &site_value, list, name)?;
+            render_list(&cfg, &templates, &site_value, list, &summaries, name)?;
             Ok(true)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -335,6 +368,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     )?;
 
     copy_static(&cfg, &static_files)?;
+    copy_assets(&cfg, &content.assets)?;
     if !has_static_style {
         write_text(&output, "style.css", theme::STYLE)?;
     }
@@ -357,7 +391,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         let lists = lists
             .iter()
             .zip(&list_keys)
-            .map(|((list, _), key)| (list.url.as_str(), *key, ""));
+            .map(|(list, key)| (list.url.as_str(), *key, ""));
         fingerprints.save(root, pages.chain(lists))?;
     }
 
@@ -416,6 +450,9 @@ fn expected_outputs(
         expected.insert("search-index.json".into());
     }
     expected.extend(static_paths.iter().cloned());
+    for asset in &content.assets {
+        expected.insert(output_rel(&asset.url));
+    }
     Ok(expected)
 }
 
@@ -426,59 +463,31 @@ fn section_page_count(section: &Listing, count: usize) -> usize {
     }
 }
 
-fn build_lists<'a>(
-    content: &'a Content,
-    index: &PageIndex<'a>,
-    summaries: &HashMap<&'a str, &'a str>,
-) -> Result<Vec<(ListView<'a>, &'static [&'static str])>> {
-    // A page's card is identical in every list it appears in, so its
-    // fingerprint is computed once here instead of once per list.
-    let keys: HashMap<&str, u64> = content
-        .pages
-        .iter()
-        .map(|page| {
-            let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
-            (page.url.as_str(), card_key(page, summary))
-        })
-        .collect();
-
-    let mut lists: Vec<(ListView<'a>, &'static [&'static str])> = Vec::new();
-    lists.push((
-        ListView {
-            title: &content.home.title,
-            url: "/".to_string(),
-            description: &content.home.description,
-            content: &content.home.html,
-            pages: content
-                .pages
-                .iter()
-                .map(|page| card(page, summaries, &keys))
-                .collect(),
-            paginator: None,
-        },
-        &["index.html"],
-    ));
+fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<'a>> {
+    let mut lists: Vec<ListSpec<'a>> = Vec::new();
+    lists.push(ListSpec {
+        title: &content.home.title,
+        url: "/".to_string(),
+        description: &content.home.description,
+        content: &content.home.html,
+        pages: content.pages.iter().collect(),
+        paginator: None,
+        candidates: &["index.html"],
+    });
     for section in &content.sections {
-        let all: Vec<CardView> = index
-            .section(&section.key)
-            .iter()
-            .copied()
-            .map(|page| card(page, summaries, &keys))
-            .collect();
+        let all = index.section(&section.key);
         let page_size = section.paginate_by.unwrap_or(0);
         let total = section_page_count(section, all.len());
         if total <= 1 {
-            lists.push((
-                ListView {
-                    title: &section.title,
-                    url: section.url.clone(),
-                    description: &section.description,
-                    content: &section.content,
-                    pages: all,
-                    paginator: None,
-                },
-                &["section.html"],
-            ));
+            lists.push(ListSpec {
+                title: &section.title,
+                url: section.url.clone(),
+                description: &section.description,
+                content: &section.content,
+                pages: all.to_vec(),
+                paginator: None,
+                candidates: &["section.html"],
+            });
             continue;
         }
         let links: Vec<PagerLink> = (1..=total)
@@ -495,59 +504,48 @@ fn build_lists<'a>(
             for link in &mut links {
                 link.current = link.number == current;
             }
-            lists.push((
-                ListView {
-                    title: &section.title,
-                    url,
-                    description: &section.description,
-                    content: &section.content,
-                    pages: chunk.to_vec(),
-                    paginator: Some(PagerView {
-                        current,
-                        total,
-                        page_size,
-                        item_count: all.len(),
-                        prev_url: (current > 1).then(|| page_url(&section.url, current - 1)),
-                        next_url: (current < total).then(|| page_url(&section.url, current + 1)),
-                        first_url: section.url.clone(),
-                        last_url: page_url(&section.url, total),
-                        links,
-                    }),
-                },
-                &["section.html"],
-            ));
+            lists.push(ListSpec {
+                title: &section.title,
+                url,
+                description: &section.description,
+                content: &section.content,
+                pages: chunk.to_vec(),
+                paginator: Some(PagerView {
+                    current,
+                    total,
+                    page_size,
+                    item_count: all.len(),
+                    prev_url: (current > 1).then(|| page_url(&section.url, current - 1)),
+                    next_url: (current < total).then(|| page_url(&section.url, current + 1)),
+                    first_url: section.url.clone(),
+                    last_url: page_url(&section.url, total),
+                    links,
+                }),
+                candidates: &["section.html"],
+            });
         }
     }
     for tag in &content.tags {
-        lists.push((
-            ListView {
-                title: &tag.title,
-                url: tag.url.clone(),
-                description: "",
-                content: "",
-                pages: index
-                    .tag(&tag.key)
-                    .iter()
-                    .copied()
-                    .map(|page| card(page, summaries, &keys))
-                    .collect(),
-                paginator: None,
-            },
-            &["tag.html", "section.html"],
-        ));
-    }
-    lists.push((
-        ListView {
-            title: "404",
-            url: "/404.html".to_string(),
+        lists.push(ListSpec {
+            title: &tag.title,
+            url: tag.url.clone(),
             description: "",
             content: "",
-            pages: Vec::new(),
+            pages: index.tag(&tag.key).to_vec(),
             paginator: None,
-        },
-        &["404.html"],
-    ));
-    Ok(lists)
+            candidates: &["tag.html", "section.html"],
+        });
+    }
+    lists.push(ListSpec {
+        title: "404",
+        url: "/404.html".to_string(),
+        description: "",
+        content: "",
+        pages: Vec::new(),
+        paginator: None,
+        candidates: &["404.html"],
+    });
+    lists
 }
 
 fn write_aliases(cfg: &Config, page: &Page, changed: bool) -> Result<()> {
@@ -631,14 +629,28 @@ fn render_list(
     cfg: &Config,
     templates: &Templates,
     site: &Value,
-    list: &ListView<'_>,
+    list: &ListSpec<'_>,
+    summaries: &HashMap<&str, &str>,
     name: &str,
 ) -> Result<()> {
     let url = &list.url;
+    let cards: Vec<CardView<'_>> = list
+        .pages
+        .iter()
+        .map(|page| card(page, summaries))
+        .collect();
+    let view = ListView {
+        title: list.title,
+        url: list.url.as_str(),
+        description: list.description,
+        content: list.content,
+        pages: cards,
+        paginator: list.paginator.as_ref(),
+    };
     let ctx = context! {
         site => site.clone(),
-        page => Serde(list),
-        pages => Serde(&list.pages),
+        page => Serde(&view),
+        pages => Serde(&view.pages),
     };
     let html = templates
         .render(name, ctx)
@@ -648,18 +660,24 @@ fn render_list(
 
 /// Hash everything a list page is rendered from. Lists are re-rendered only
 /// when one of their cards, their own metadata, or the site context changes.
-fn list_key(header: u64, template: &str, list: &ListView<'_>) -> u64 {
+fn list_key(
+    header: u64,
+    template: &str,
+    list: &ListSpec<'_>,
+    card_keys: &HashMap<&str, u64>,
+) -> u64 {
     let mut hash = cache::fingerprint(header, template.as_bytes());
     hash = cache::fingerprint(hash, list.url.as_bytes());
     hash = cache::fingerprint(hash, list.title.as_bytes());
     hash = cache::fingerprint(hash, list.description.as_bytes());
     hash = cache::fingerprint(hash, list.content.as_bytes());
-    for card in &list.pages {
+    for page in &list.pages {
         // Each card carries a fingerprint of the fields it renders, computed
         // once per page, so a list hashes two words per card instead of every
         // field of every card.
-        hash = cache::fingerprint(hash, card.url.as_bytes());
-        hash = cache::fingerprint(hash, &card.key.to_le_bytes());
+        hash = cache::fingerprint(hash, page.url.as_bytes());
+        let key = card_keys.get(page.url.as_str()).copied().unwrap_or(0);
+        hash = cache::fingerprint(hash, &key.to_le_bytes());
     }
     if let Some(pager) = &list.paginator {
         for number in [
@@ -808,6 +826,9 @@ fn validate_urls(cfg: &Config, content: &Content) -> Result<()> {
     for tag in &content.tags {
         add(&tag.url, &format!("tag {}", tag.title))?;
     }
+    for asset in &content.assets {
+        add(&asset.url, &format!("asset {}", asset.source.display()))?;
+    }
     Ok(())
 }
 
@@ -952,6 +973,9 @@ fn site_view<'a>(cfg: &Config, content: &'a Content, index: &PageIndex<'a>) -> S
     let sections = content
         .sections
         .iter()
+        // `site.sections` is the top-level navigation; nested sections still
+        // render their own listings at their own URLs.
+        .filter(|section| !section.key.contains('/'))
         .map(|section| SectionView {
             title: &section.title,
             url: &section.url,
@@ -1013,11 +1037,7 @@ fn describe<'a>(page: &'a Page, summary: &'a str) -> &'a str {
     }
 }
 
-fn card<'a>(
-    page: &'a Page,
-    summaries: &HashMap<&'a str, &'a str>,
-    keys: &HashMap<&'a str, u64>,
-) -> CardView<'a> {
+fn card<'a>(page: &'a Page, summaries: &HashMap<&'a str, &'a str>) -> CardView<'a> {
     let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
     CardView {
         title: &page.title,
@@ -1029,7 +1049,6 @@ fn card<'a>(
         summary: describe(page, summary),
         tags: &page.tags,
         section: page.section.as_deref(),
-        key: keys.get(page.url.as_str()).copied().unwrap_or(0),
     }
 }
 
@@ -1217,6 +1236,22 @@ fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+fn copy_assets(cfg: &Config, assets: &[content::Asset]) -> Result<()> {
+    let dest = cfg.output();
+    assets.par_iter().try_for_each(|asset| {
+        let target = dest.join(output_rel(&asset.url));
+        if is_up_to_date(&asset.source, &target) {
+            return Ok(());
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&asset.source, &target)?;
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
 fn is_up_to_date(source: &Path, target: &Path) -> bool {
     let (Ok(src), Ok(dst)) = (fs::metadata(source), fs::metadata(target)) else {
         return false;
@@ -1231,10 +1266,7 @@ fn is_up_to_date(source: &Path, target: &Path) -> bool {
 }
 
 fn rel_string(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+    content::rel_string(path)
 }
 
 #[cfg(test)]
