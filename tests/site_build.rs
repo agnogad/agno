@@ -835,6 +835,47 @@ fn rebuild_recreates_an_output_directory_that_was_removed() {
 }
 
 #[test]
+fn a_no_op_rebuild_leaves_generated_files_untouched() {
+    let root = fixture("noop-mtimes");
+    build_incremental(&root);
+    let rss = root.join("dist/rss.xml");
+    let sitemap = root.join("dist/sitemap.xml");
+    let manifest = root.join(".agno-cache/outputs.json");
+    let before = (modified(&rss), modified(&sitemap), modified(&manifest));
+
+    build_incremental(&root);
+
+    assert_eq!(
+        before,
+        (modified(&rss), modified(&sitemap), modified(&manifest)),
+        "a rebuild rewrote a feed or the manifest even though nothing changed"
+    );
+}
+
+#[test]
+fn a_card_neutral_edit_leaves_the_list_pages_alone() {
+    let root = fixture("card-key");
+    build_incremental(&root);
+    let home = root.join("dist/index.html");
+    let before = modified(&home);
+
+    let post = root.join("content/blog/hello.md");
+    let original = fs::read_to_string(&post).unwrap();
+    fs::write(&post, format!("{original}\n\nA trailing paragraph.\n")).unwrap();
+    build_incremental(&root);
+
+    assert_eq!(
+        before,
+        modified(&home),
+        "the home list was rewritten although no card changed"
+    );
+    assert!(
+        text(&root.join("dist/blog/hello/index.html")).contains("trailing paragraph"),
+        "the edited page itself was not re-rendered"
+    );
+}
+
+#[test]
 fn cards_use_the_rendered_summary_when_no_description_is_set() {
     let root = fixture("summary-cards");
     fs::write(

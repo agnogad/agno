@@ -100,9 +100,9 @@ struct CardView<'a> {
     summary: &'a str,
     tags: &'a [String],
     section: Option<&'a str>,
-    /// Source fingerprint of the card's page, used to key the list cache.
+    /// Hash of everything this card displays, used to key the list cache.
     #[serde(skip)]
-    content_key: u64,
+    key: u64,
 }
 
 #[derive(Serialize)]
@@ -431,6 +431,17 @@ fn build_lists<'a>(
     index: &PageIndex<'a>,
     summaries: &HashMap<&'a str, &'a str>,
 ) -> Result<Vec<(ListView<'a>, &'static [&'static str])>> {
+    // A page's card is identical in every list it appears in, so its
+    // fingerprint is computed once here instead of once per list.
+    let keys: HashMap<&str, u64> = content
+        .pages
+        .iter()
+        .map(|page| {
+            let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
+            (page.url.as_str(), card_key(page, summary))
+        })
+        .collect();
+
     let mut lists: Vec<(ListView<'a>, &'static [&'static str])> = Vec::new();
     lists.push((
         ListView {
@@ -441,7 +452,7 @@ fn build_lists<'a>(
             pages: content
                 .pages
                 .iter()
-                .map(|page| card(page, summaries))
+                .map(|page| card(page, summaries, &keys))
                 .collect(),
             paginator: None,
         },
@@ -452,7 +463,7 @@ fn build_lists<'a>(
             .section(&section.key)
             .iter()
             .copied()
-            .map(|page| card(page, summaries))
+            .map(|page| card(page, summaries, &keys))
             .collect();
         let page_size = section.paginate_by.unwrap_or(0);
         let total = section_page_count(section, all.len());
@@ -518,7 +529,7 @@ fn build_lists<'a>(
                     .tag(&tag.key)
                     .iter()
                     .copied()
-                    .map(|page| card(page, summaries))
+                    .map(|page| card(page, summaries, &keys))
                     .collect(),
                 paginator: None,
             },
@@ -644,12 +655,11 @@ fn list_key(header: u64, template: &str, list: &ListView<'_>) -> u64 {
     hash = cache::fingerprint(hash, list.description.as_bytes());
     hash = cache::fingerprint(hash, list.content.as_bytes());
     for card in &list.pages {
-        // Every other card field (title, dates, reading time, summary, tags,
-        // section) is derived from the page source, so the source fingerprint
-        // stands in for all of them. Hashing them one by one cost
-        // O(cards x fields) per list, which hurt tag-heavy sites.
+        // Each card carries a fingerprint of the fields it renders, computed
+        // once per page, so a list hashes two words per card instead of every
+        // field of every card.
         hash = cache::fingerprint(hash, card.url.as_bytes());
-        hash = cache::fingerprint(hash, &card.content_key.to_le_bytes());
+        hash = cache::fingerprint(hash, &card.key.to_le_bytes());
     }
     if let Some(pager) = &list.paginator {
         for number in [
@@ -725,21 +735,27 @@ fn output_path(cfg: &Config, url: &str) -> PathBuf {
 }
 
 pub fn output_rel(url: &str) -> String {
-    let mut segments: Vec<&str> = url
+    // Built straight into one buffer: this runs a handful of times per page per
+    // build, and a `Vec` of segments plus a `join` doubled the allocations.
+    let mut out = String::with_capacity(url.len() + 11);
+    let mut empty = true;
+    for segment in url
         .split('/')
         .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
-        .collect();
-    if url.ends_with('/') || segments.is_empty() {
-        segments.push("index.html");
+    {
+        if !empty {
+            out.push('/');
+        }
+        out.push_str(segment);
+        empty = false;
     }
-    segments.join("/")
-}
-
-fn ancestors(path: &str) -> Vec<&str> {
-    path.char_indices()
-        .filter(|(_, ch)| *ch == '/')
-        .map(|(index, _)| &path[..index])
-        .collect()
+    if url.ends_with('/') || empty {
+        if !empty {
+            out.push('/');
+        }
+        out.push_str("index.html");
+    }
+    out
 }
 
 pub fn validate_outputs(cfg: &Config, content: &Content) -> Result<()> {
@@ -750,14 +766,19 @@ fn validate_urls(cfg: &Config, content: &Content) -> Result<()> {
     let mut files: HashMap<String, String> = HashMap::new();
     let mut dirs: HashSet<String> = HashSet::new();
     let mut add = |url: &str, what: &str| -> Result<()> {
-        let key = output_rel(url).to_ascii_lowercase();
+        let mut key = output_rel(url);
+        // URL matching is case-insensitive, which is what a static host does.
+        key.make_ascii_lowercase();
         if let Some(existing) = files.insert(key.clone(), what.to_string()) {
             bail!("duplicate output URL {url}: {existing} and {what}");
         }
         if dirs.contains(&key) {
             bail!("output path conflict at {url}: another output is below it");
         }
-        for parent in ancestors(&key) {
+        // Walk the parent directories without collecting them into a `Vec`:
+        // this runs once per output path.
+        for (index, _) in key.char_indices().filter(|(_, ch)| *ch == '/') {
+            let parent = &key[..index];
             if let Some(existing) = files.get(parent) {
                 bail!("output path conflict at {url}: {existing} is a file at {parent}");
             }
@@ -992,7 +1013,11 @@ fn describe<'a>(page: &'a Page, summary: &'a str) -> &'a str {
     }
 }
 
-fn card<'a>(page: &'a Page, summaries: &HashMap<&'a str, &'a str>) -> CardView<'a> {
+fn card<'a>(
+    page: &'a Page,
+    summaries: &HashMap<&'a str, &'a str>,
+    keys: &HashMap<&'a str, u64>,
+) -> CardView<'a> {
     let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
     CardView {
         title: &page.title,
@@ -1004,8 +1029,26 @@ fn card<'a>(page: &'a Page, summaries: &HashMap<&'a str, &'a str>) -> CardView<'
         summary: describe(page, summary),
         tags: &page.tags,
         section: page.section.as_deref(),
-        content_key: page.content_key,
+        key: keys.get(page.url.as_str()).copied().unwrap_or(0),
     }
+}
+
+/// Hash of everything a card puts on the page. A list is re-rendered only when
+/// one of its cards would actually look different, so editing a paragraph that
+/// does not touch the summary leaves the home page and the tag pages alone.
+fn card_key(page: &Page, summary: &str) -> u64 {
+    let mut hash = cache::fingerprint(0, page.title.as_bytes());
+    hash = cache::fingerprint(hash, page.url.as_bytes());
+    hash = cache::fingerprint(hash, page.date_text.as_bytes());
+    hash = cache::fingerprint(hash, page.date_display.as_bytes());
+    hash = cache::fingerprint(hash, page.datetime.as_bytes());
+    hash = cache::fingerprint(hash, describe(page, summary).as_bytes());
+    hash = cache::fingerprint(hash, page.section.as_deref().unwrap_or_default().as_bytes());
+    hash = cache::fingerprint(hash, &page.reading_minutes.to_le_bytes());
+    for tag in &page.tags {
+        hash = cache::fingerprint(hash, tag.as_bytes());
+    }
+    hash
 }
 
 fn rss(cfg: &Config, pages: &[Page], summaries: &HashMap<&str, &str>) -> String {
@@ -1196,9 +1239,23 @@ fn rel_string(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::remove_all;
+    use super::{output_rel, remove_all};
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn output_rel_maps_urls_to_files() {
+        assert_eq!(output_rel("/"), "index.html");
+        assert_eq!(output_rel("/blog/"), "blog/index.html");
+        assert_eq!(output_rel("/blog/page/2/"), "blog/page/2/index.html");
+        assert_eq!(output_rel("/blog/thing.html"), "blog/thing.html");
+        assert_eq!(
+            output_rel("/blog/thing.html/"),
+            "blog/thing.html/index.html"
+        );
+        assert_eq!(output_rel("/a//b/"), "a/b/index.html");
+        assert_eq!(output_rel("/a/../b/"), "a/b/index.html");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("agno-rm-{}-{name}", std::process::id()));
