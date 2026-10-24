@@ -38,11 +38,20 @@ pub fn check(root: &Path, drafts: bool) -> Result<Report> {
         ..Report::default()
     };
 
-    if let Err(err) = site::validate_outputs(&cfg, &content) {
+    let static_paths = site::static_paths(&cfg)?;
+    if let Err(err) = site::validate_outputs(&cfg, &content, &static_paths) {
         report.errors.push(err.to_string());
     }
 
-    let known = known_outputs(&cfg, &content);
+    let known = match site::expected_outputs(&cfg, &content, &static_paths) {
+        Ok(known) => known,
+        Err(err) => {
+            // A paginated URL that collides with another output is a build
+            // error too; report it instead of guessing at the link set.
+            report.errors.push(err.to_string());
+            return Ok(report);
+        }
+    };
 
     // Everything whose Markdown body can carry links: regular pages, the home
     // page and section indexes. `_index.md` bodies were never scanned before,
@@ -206,104 +215,31 @@ fn raw_ids(body: &str) -> Vec<String> {
     ids
 }
 
-/// Every path the build will write, in `output_rel` form.
-fn known_outputs(cfg: &Config, content: &Content) -> HashSet<String> {
-    let mut known = HashSet::new();
-    let mut add = |url: &str| {
-        known.insert(site::output_rel(url));
-    };
-
-    add("/");
-    add("/404.html");
-    add("/style.css");
-    add("/rss.xml");
-    add("/sitemap.xml");
-    add("/robots.txt");
-    if cfg.search_index {
-        add("/search-index.json");
-    }
-    for page in &content.pages {
-        add(&page.url);
-        for alias in &page.aliases {
-            add(alias);
-        }
-    }
-    for section in &content.sections {
-        add(&section.url);
-    }
-    for tag in &content.tags {
-        add(&tag.url);
-    }
-    for asset in &content.assets {
-        add(&asset.url);
-    }
-
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for page in &content.pages {
-        if let Some(section) = page.section.as_deref() {
-            *counts.entry(section).or_default() += 1;
-        }
-    }
-    for section in &content.sections {
-        let Some(size) = section.paginate_by else {
-            continue;
-        };
-        let total = counts
-            .get(section.key.as_str())
-            .copied()
-            .unwrap_or(0)
-            .div_ceil(size);
-        for number in 2..=total {
-            add(&format!(
-                "{}/page/{number}/",
-                section.url.trim_end_matches('/')
-            ));
-        }
-    }
-
-    if cfg.static_dir().is_dir() {
-        for entry in walkdir::WalkDir::new(cfg.static_dir())
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().is_file())
-        {
-            if let Ok(rel) = entry.path().strip_prefix(cfg.static_dir()) {
-                let rel = rel
-                    .components()
-                    .map(|part| part.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                known.insert(rel);
-            }
-        }
-    }
-
-    known
-}
-
 /// Turn a link into the `output_rel` key of the file it should hit, or `None`
 /// when the link is external, an in-page anchor, or otherwise not checkable.
 pub fn resolve_link(from_url: &str, target: &str) -> Option<String> {
     let target = target.trim();
-    if target.is_empty()
-        || target.starts_with('#')
-        || target.starts_with("//")
-        || target.contains("://")
-        || target.starts_with("mailto:")
-        || target.starts_with("tel:")
-        || target.starts_with("data:")
-        || target.starts_with("javascript:")
-    {
+    if target.is_empty() || target.starts_with('#') || target.starts_with("//") {
+        return None;
+    }
+    // Any RFC 3986 scheme (`https:`, `mailto:`, `sms:`, `data:`, ...) points
+    // outside the site. Checking for a scheme instead of a fixed list keeps
+    // app-specific links such as `sms:` from being reported as broken pages.
+    if has_scheme(target) {
         return None;
     }
     let path = target.split(['#', '?']).next().unwrap_or("");
     if path.is_empty() {
         return None;
     }
+    // A link written as `my%20file.pdf` must resolve to the file the build
+    // writes as `my file.pdf`. A stray `%` is not an escape: fall back to the
+    // literal path so a file genuinely named `100%.pdf` still resolves.
+    let path = site::percent_decode(path).unwrap_or_else(|| path.to_string());
 
     let mut segments: Vec<&str> = Vec::new();
     let joined = if path.starts_with('/') {
-        path.to_string()
+        path
     } else {
         let base = from_url
             .rsplit_once('/')
@@ -325,11 +261,20 @@ pub fn resolve_link(from_url: &str, target: &str) -> Option<String> {
         return Some("index.html".to_string());
     }
     let last = segments.last().copied().unwrap_or("");
-    if path.ends_with('/') || !last.contains('.') {
+    if joined.ends_with('/') || !last.contains('.') {
         Some(format!("{key}/index.html"))
     } else {
         Some(key)
     }
+}
+
+fn has_scheme(target: &str) -> bool {
+    let Some((scheme, _)) = target.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 /// Blank out fenced code so links inside examples are not reported.
@@ -413,6 +358,17 @@ mod tests {
         );
         assert_eq!(resolve_link("/blog/post/", "#section"), None);
         assert_eq!(resolve_link("/blog/post/", "https://example.com"), None);
+        assert_eq!(
+            resolve_link("/blog/post/", "/my%20file.pdf").as_deref(),
+            Some("my file.pdf")
+        );
+        assert_eq!(
+            resolve_link("/blog/post/", "/100%.pdf").as_deref(),
+            Some("100%.pdf")
+        );
+        assert_eq!(resolve_link("/blog/post/", "sms:+15551234"), None);
+        assert_eq!(resolve_link("/blog/post/", "mailto:a@example.com"), None);
+        assert_eq!(resolve_link("/blog/post/", "custom-scheme:thing"), None);
     }
 
     #[test]

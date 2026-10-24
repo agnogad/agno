@@ -970,6 +970,81 @@ fn page_bundle_assets_are_copied_and_checked() {
 }
 
 #[test]
+fn check_decodes_percent_escaped_links_and_skips_other_schemes() {
+    let root = fixture("check-encoded");
+    fs::create_dir_all(root.join("static")).unwrap();
+    fs::write(root.join("static/my file.pdf"), "pdf").unwrap();
+    fs::write(
+        root.join("content/blog/encoded.md"),
+        "+++\ntitle = \"Encoded\"\ndate = 2024-01-01\n+++\n\n\
+         [pdf](/my%20file.pdf)\n\n[sms](sms:+15551234)\n\n[mail](mailto:a@example.com)\n",
+    )
+    .unwrap();
+
+    let report = agno::check::check(&root, false).unwrap();
+    assert!(report.ok(), "{:?}", report.errors);
+}
+
+#[test]
+fn a_static_file_cannot_silently_replace_a_page() {
+    let root = fixture("static-page-collision");
+    fs::create_dir_all(root.join("static/about")).unwrap();
+    fs::write(root.join("static/about/index.html"), "static wins").unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate output URL"), "{err}");
+
+    let report = agno::check::check(&root, false).unwrap();
+    assert!(!report.ok());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate output URL")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn a_static_file_cannot_replace_a_paginated_page() {
+    let root = fixture("static-pagination-collision");
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\npaginate_by = 1\n+++\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/second.md"),
+        "+++\ntitle = \"Second\"\ndate = 2024-05-02\n+++\n\nSecond post.\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("static/blog/page/2")).unwrap();
+    fs::write(root.join("static/blog/page/2/index.html"), "static wins").unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate output URL"), "{err}");
+}
+
+#[test]
 fn check_reports_source_lines_and_reference_links() {
     let root = fixture("check-lines");
     fs::write(

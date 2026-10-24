@@ -172,7 +172,7 @@ fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
 
 fn resolve(dist: &Path, url_path: &str) -> Option<PathBuf> {
     let url_path = url_path.split(['?', '#']).next().unwrap_or("");
-    let decoded = percent_decode(url_path)?;
+    let decoded = site::percent_decode(url_path)?;
     if decoded.contains(['\\', '\0']) {
         return None;
     }
@@ -195,36 +195,6 @@ fn resolve(dist: &Path, url_path: &str) -> Option<PathBuf> {
         return index.is_file().then_some(index);
     }
     None
-}
-
-fn percent_decode(input: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
-                return None;
-            }
-            let hi = hex(bytes[i + 1])?;
-            let lo = hex(bytes[i + 2])?;
-            out.push(hi * 16 + lo);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
-fn hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn inject(html: &str) -> String {
@@ -284,14 +254,14 @@ mod tests {
     #[test]
     fn percent_decode_handles_spaces_and_rejects_traversal() {
         assert_eq!(
-            percent_decode("/hello%20world/").as_deref(),
+            site::percent_decode("/hello%20world/").as_deref(),
             Some("/hello world/")
         );
         assert_eq!(
-            percent_decode("/%2e%2e/secret").as_deref(),
+            site::percent_decode("/%2e%2e/secret").as_deref(),
             Some("/../secret")
         );
-        assert_eq!(percent_decode("/bad%zz"), None);
+        assert_eq!(site::percent_decode("/bad%zz"), None);
     }
 
     #[test]
