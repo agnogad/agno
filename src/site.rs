@@ -217,8 +217,15 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
 
     let phase = Instant::now();
     let content = content::load(&cfg, opts.drafts)?;
-    validate_urls(&cfg, &content)?;
     let ms_load = phase.elapsed().as_millis();
+
+    let static_files = static_files(&cfg)?;
+    let static_paths = static_rels(&cfg, &static_files)?;
+    // Content outputs and static files share one namespace: a page at
+    // `/about/` and `static/about/index.html` would otherwise race, with the
+    // static copy silently replacing the page.
+    validate_urls(&cfg, &content, &static_paths)?;
+    let has_static_style = static_paths.iter().any(|path| path == "style.css");
 
     let templates = Templates::load(&cfg.templates())?;
     let index = PageIndex::new(&content.pages);
@@ -236,22 +243,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
 
     // Stale output is removed before anything is written, so a URL that
     // changed shape (file to directory, or back) can be recreated cleanly.
-    let static_files = static_files(&cfg)?;
-    let static_paths = static_rels(&cfg, &static_files)?;
-    let has_static_style = static_paths.iter().any(|path| path == "style.css");
-    // Static files and page bundle assets are copied in parallel, so the same
-    // relative path from both sources would win nondeterministically.
-    for asset in &content.assets {
-        let rel = output_rel(&asset.url);
-        if static_paths.contains(&rel) {
-            bail!(
-                "page bundle asset {} collides with static file {rel}",
-                asset.source.display()
-            );
-        }
-    }
-    // Read the previous manifest once: stale cleanup and the final write both
-    // need it, and it doubles as the "did anything change?" check below.
+    // The previous manifest doubles as the "did anything change?" check below.
     let previous = if opts.clean {
         None
     } else {
@@ -407,7 +399,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
 
 /// Every path the build is expected to write, computed from metadata only so
 /// stale output can be removed before any page is rendered.
-fn expected_outputs(
+pub(crate) fn expected_outputs(
     cfg: &Config,
     content: &Content,
     static_paths: &[String],
@@ -752,6 +744,34 @@ fn output_path(cfg: &Config, url: &str) -> PathBuf {
     cfg.output().join(output_rel(url))
 }
 
+/// Decode `%XX` escapes in a URL path. Returns `None` for malformed input.
+pub(crate) fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = hex(*bytes.get(i + 1)?)?;
+            let lo = hex(*bytes.get(i + 2)?)?;
+            out.push(hi * 16 + lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 pub fn output_rel(url: &str) -> String {
     // Built straight into one buffer: this runs a handful of times per page per
     // build, and a `Vec` of segments plus a `join` doubled the allocations.
@@ -776,58 +796,97 @@ pub fn output_rel(url: &str) -> String {
     out
 }
 
-pub fn validate_outputs(cfg: &Config, content: &Content) -> Result<()> {
-    validate_urls(cfg, content)
+pub fn validate_outputs(cfg: &Config, content: &Content, static_paths: &[String]) -> Result<()> {
+    validate_urls(cfg, content, static_paths)
 }
 
-fn validate_urls(cfg: &Config, content: &Content) -> Result<()> {
-    let mut files: HashMap<String, String> = HashMap::new();
-    let mut dirs: HashSet<String> = HashSet::new();
-    let mut add = |url: &str, what: &str| -> Result<()> {
-        let mut key = output_rel(url);
-        // URL matching is case-insensitive, which is what a static host does.
-        key.make_ascii_lowercase();
-        if let Some(existing) = files.insert(key.clone(), what.to_string()) {
-            bail!("duplicate output URL {url}: {existing} and {what}");
+#[derive(Default)]
+struct Outputs {
+    files: HashMap<String, String>,
+    dirs: HashSet<String>,
+}
+
+impl Outputs {
+    fn add(&mut self, url: &str, what: &str) -> Result<()> {
+        self.add_key(&output_rel(url), url, what)
+    }
+
+    /// URL matching is case-insensitive, which is what a static host does.
+    fn add_key(&mut self, key: &str, display: &str, what: &str) -> Result<()> {
+        let key = key.to_ascii_lowercase();
+        if let Some(existing) = self.files.insert(key.clone(), what.to_string()) {
+            bail!("duplicate output URL {display}: {existing} and {what}");
         }
-        if dirs.contains(&key) {
-            bail!("output path conflict at {url}: another output is below it");
+        if self.dirs.contains(&key) {
+            bail!("output path conflict at {display}: another output is below it");
         }
         // Walk the parent directories without collecting them into a `Vec`:
         // this runs once per output path.
         for (index, _) in key.char_indices().filter(|(_, ch)| *ch == '/') {
             let parent = &key[..index];
-            if let Some(existing) = files.get(parent) {
-                bail!("output path conflict at {url}: {existing} is a file at {parent}");
+            if let Some(existing) = self.files.get(parent) {
+                bail!("output path conflict at {display}: {existing} is a file at {parent}");
             }
-            dirs.insert(parent.to_string());
+            self.dirs.insert(parent.to_string());
+        }
+        Ok(())
+    }
+}
+
+fn validate_urls(cfg: &Config, content: &Content, static_paths: &[String]) -> Result<()> {
+    let mut out = Outputs::default();
+    let overridden: HashSet<&str> = static_paths.iter().map(String::as_str).collect();
+
+    // A static file sitting on a generated root path intentionally replaces
+    // that output: `static/style.css` is the documented theme override, and
+    // the same trick is useful for robots.txt or a hand-written 404 page.
+    let mut root = |url: &str, what: &str| -> Result<()> {
+        if !overridden.contains(output_rel(url).as_str()) {
+            out.add(url, what)?;
         }
         Ok(())
     };
-
-    add("/", "home")?;
-    add("/404.html", "404 page")?;
-    add("/style.css", "default stylesheet")?;
-    add("/rss.xml", "RSS feed")?;
-    add("/sitemap.xml", "sitemap")?;
-    add("/robots.txt", "robots.txt")?;
+    root("/", "home")?;
+    root("/404.html", "404 page")?;
+    root("/style.css", "default stylesheet")?;
+    root("/rss.xml", "RSS feed")?;
+    root("/sitemap.xml", "sitemap")?;
+    root("/robots.txt", "robots.txt")?;
     if cfg.search_index {
-        add("/search-index.json", "search index")?;
+        root("/search-index.json", "search index")?;
     }
     for page in &content.pages {
-        add(&page.url, &format!("page {}", page.source.display()))?;
+        out.add(&page.url, &format!("page {}", page.source.display()))?;
         for alias in &page.aliases {
-            add(alias, &format!("alias of {}", page.url))?;
+            out.add(alias, &format!("alias of {}", page.url))?;
+        }
+    }
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for page in &content.pages {
+        if let Some(section) = page.section.as_deref() {
+            *counts.entry(section).or_default() += 1;
         }
     }
     for section in &content.sections {
-        add(&section.url, &format!("section {}", section.key))?;
+        out.add(&section.url, &format!("section {}", section.key))?;
+        let count = counts.get(section.key.as_str()).copied().unwrap_or(0);
+        for number in 2..=section_page_count(section, count) {
+            out.add(
+                &page_url(&section.url, number),
+                &format!("page {number} of section {}", section.key),
+            )?;
+        }
     }
     for tag in &content.tags {
-        add(&tag.url, &format!("tag {}", tag.title))?;
+        out.add(&tag.url, &format!("tag {}", tag.title))?;
     }
     for asset in &content.assets {
-        add(&asset.url, &format!("asset {}", asset.source.display()))?;
+        out.add(&asset.url, &format!("asset {}", asset.source.display()))?;
+    }
+    // Static files come last so a collision reports the page or asset that
+    // owns the path, rather than whichever happened to be added first.
+    for rel in static_paths {
+        out.add_key(rel, rel, &format!("static file {rel}"))?;
     }
     Ok(())
 }
@@ -1214,6 +1273,12 @@ fn static_rels(cfg: &Config, files: &[PathBuf]) -> Result<Vec<String>> {
         .collect()
 }
 
+/// Relative output paths of every file in `static/`, for callers that need to
+/// validate links or output collisions without copying anything.
+pub(crate) fn static_paths(cfg: &Config) -> Result<Vec<String>> {
+    static_rels(cfg, &static_files(cfg)?)
+}
+
 fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
     let src = cfg.static_dir();
     let dest = cfg.output();
@@ -1228,7 +1293,7 @@ fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
             return Ok(());
         }
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
+            ensure_dir(parent)?;
         }
         fs::copy(file, &target)?;
         Ok::<(), anyhow::Error>(())
@@ -1244,7 +1309,7 @@ fn copy_assets(cfg: &Config, assets: &[content::Asset]) -> Result<()> {
             return Ok(());
         }
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
+            ensure_dir(parent)?;
         }
         fs::copy(&asset.source, &target)?;
         Ok::<(), anyhow::Error>(())
