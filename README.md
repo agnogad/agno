@@ -121,9 +121,9 @@ at startup with `GLIBC_2.34 not found`.
 Two separate problems forced the differences, and both are worth knowing if you
 build from source:
 
-**musl's allocator does not scale.** Not in the highlighting path, just under
-contention — so the static build uses mimalloc. That is where most of its
-memory goes: 118 MB against 38 MB with no code in the site.
+**musl's allocator does not scale under contention.** Not specific to
+highlighting — plain pages suffer too — so the static build uses mimalloc. That
+is where most of its memory goes: 118 MB against 38 MB with no code in the site.
 
 **Oniguruma serialises on a global lock** that glibc's adaptive mutex absorbs
 and musl's does not. With it, the 0.3.6 static build took 2.9 s on one thread
