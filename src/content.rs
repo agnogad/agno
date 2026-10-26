@@ -166,7 +166,32 @@ impl Listing {
     }
 }
 
-pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
+/// Whether a build or a check includes pages marked `draft = true`.
+///
+/// A bare `bool` made `check(&root, false)` unreadable at the call site, and
+/// three separate functions ask the same question.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Drafts {
+    #[default]
+    Skip,
+    Include,
+}
+
+impl Drafts {
+    /// True when drafts belong in the output.
+    pub fn includes(self) -> bool {
+        matches!(self, Self::Include)
+    }
+}
+
+impl From<bool> for Drafts {
+    fn from(include: bool) -> Self {
+        if include { Self::Include } else { Self::Skip }
+    }
+}
+
+pub fn load(cfg: &Config, drafts: Drafts) -> Result<Content> {
+    let include_drafts = drafts.includes();
     let root = cfg.content();
     let mut page_paths: Vec<PathBuf> = Vec::new();
     let mut index_paths: HashMap<String, PathBuf> = HashMap::new();
@@ -654,13 +679,20 @@ fn is_named(name: &str, stem: &str) -> bool {
     }
 }
 
-/// The source line that `body` starts on. `split_frontmatter` returns a
-/// subslice of the file, so the prefix length gives the line offset.
+/// The source line that `body` starts on.
+///
+/// `split_frontmatter` returns the tail of the file, so the missing prefix is
+/// exactly the offset. Deriving it from the lengths instead of from the two
+/// pointers keeps the arithmetic checked: a future change that returns an owned
+/// body would fall back to line 1 instead of underflowing.
 fn body_start_line(src: &str, body: &str) -> usize {
-    let offset = body.as_ptr() as usize - src.as_ptr() as usize;
-    if offset > src.len() {
+    let Some(offset) = src
+        .len()
+        .checked_sub(body.len())
+        .filter(|_| src.ends_with(body))
+    else {
         return 1;
-    }
+    };
     1 + src[..offset].bytes().filter(|byte| *byte == b'\n').count()
 }
 
@@ -955,7 +987,12 @@ fn normalize_url(url: &str) -> Result<String> {
     {
         bail!("url must not contain . or .. segments");
     }
-    if url.ends_with('/') || url.ends_with(".html") {
+    // `.HTML` is a URL a user can write by hand; treating only `.html` as an
+    // extension added a second trailing slash to `/page.HTML/`.
+    let ends_with_html = url
+        .get(url.len().saturating_sub(5)..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(".html"));
+    if url.ends_with('/') || ends_with_html {
         Ok(url)
     } else {
         Ok(format!("{url}/"))
@@ -1112,5 +1149,16 @@ mod tests {
         assert!(is_bundle_index("Index.MD"));
         assert!(!is_bundle_index("_index.md"));
         assert!(!is_bundle_index("indexes.md"));
+    }
+
+    #[test]
+    fn a_url_ending_in_an_html_extension_keeps_its_shape() {
+        assert_eq!(normalize_url("/page.html").unwrap(), "/page.html");
+        assert_eq!(normalize_url("/page.HTML").unwrap(), "/page.HTML");
+        assert_eq!(normalize_url("/page.Html").unwrap(), "/page.Html");
+        assert_eq!(normalize_url("/page").unwrap(), "/page/");
+        // A short path must not be mistaken for an extension.
+        assert_eq!(normalize_url("/html").unwrap(), "/html/");
+        assert_eq!(normalize_url("/a.htm").unwrap(), "/a.htm/");
     }
 }

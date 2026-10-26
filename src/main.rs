@@ -1,7 +1,8 @@
-use agno::config::Config;
+use agno::content::Drafts;
+use agno::scaffold::Overwrite;
 use agno::site::{self, BuildOptions};
 use agno::{check, scaffold, serve};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -81,7 +82,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::New { path, force } => {
-            scaffold::create(&path, force)?;
+            scaffold::create(&path, Overwrite::from(force))?;
             println!("Created {}", path.display());
             println!("\n  cd {}\n  agno dev\n", path.display());
         }
@@ -105,39 +106,30 @@ fn main() -> Result<()> {
             if stats {
                 println!(
                     "  content {} ms · pages {} ms · lists+feeds {} ms",
-                    report.ms_load, report.ms_pages, report.ms_rest
+                    report.load.as_millis(),
+                    report.render.as_millis(),
+                    report.rest.as_millis()
                 );
             }
             println!(
                 "Built {} pages in {} ms → {}",
                 report.pages,
-                report.ms_total,
+                report.total.as_millis(),
                 report.output.display()
             );
         }
         Command::Dev { port, drafts, root } => {
             let root = root.unwrap_or_else(|| PathBuf::from("."));
-            serve::dev(root, port, drafts)?;
+            serve::dev(&root, port, Drafts::from(drafts))?;
         }
         Command::Clean { root } => {
             let root = root.unwrap_or_else(|| PathBuf::from("."));
-            let cfg = Config::load(&root)?;
-            cfg.validate()?;
-            let output = cfg.output();
-            if output.exists() {
-                agno::site::remove_all(&output)
-                    .with_context(|| format!("removing {}", output.display()))?;
-            }
-            let cache = root.join(".agno-cache");
-            if cache.exists() {
-                agno::site::remove_all(&cache)
-                    .with_context(|| format!("removing {}", cache.display()))?;
-            }
+            let output = site::clean(&root)?;
             println!("Cleaned {}", output.display());
         }
         Command::Check { drafts, root } => {
             let root = root.unwrap_or_else(|| PathBuf::from("."));
-            let report = check::check(&root, drafts)?;
+            let report = check::check(&root, Drafts::from(drafts))?;
             print!("{}", check::render(&report));
             if !report.ok() {
                 eprintln!(

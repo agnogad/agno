@@ -35,9 +35,13 @@ pub fn combine(values: &[u64]) -> u64 {
     hash
 }
 
-pub struct Entry {
-    pub key: u64,
-    pub summary: String,
+/// One page's cached render fingerprint and summary.
+///
+/// Private: no public method hands an `Entry` out, so making the type public
+/// only promised an API the crate does not keep.
+struct Entry {
+    key: u64,
+    summary: String,
 }
 
 pub struct Fingerprints {
@@ -85,17 +89,17 @@ impl Fingerprints {
         let mut out = Vec::with_capacity(16 + items.len() * 64);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&self.header.to_le_bytes());
-        out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        out.extend_from_slice(&field_len(items.len(), "the page count")?.to_le_bytes());
         for (url, key, summary) in items {
             let url = url.as_bytes();
             let summary = summary.as_bytes();
             // Lengths are u32 and never clamped: a frontmatter summary is
             // arbitrary text, and truncating it here made a rebuild render a
             // shorter summary than the build that filled the cache.
-            out.extend_from_slice(&(url.len() as u32).to_le_bytes());
+            out.extend_from_slice(&field_len(url.len(), "a cached url")?.to_le_bytes());
             out.extend_from_slice(url);
             out.extend_from_slice(&key.to_le_bytes());
-            out.extend_from_slice(&(summary.len() as u32).to_le_bytes());
+            out.extend_from_slice(&field_len(summary.len(), "a cached summary")?.to_le_bytes());
             out.extend_from_slice(summary);
         }
 
@@ -107,6 +111,22 @@ impl Fingerprints {
         fs::write(&tmp, &out)?;
         fs::rename(&tmp, &target)
     }
+}
+
+/// A length that fits the on-disk `u32` field.
+///
+/// The previous version wrote `len as u32`, which wraps silently: a 4 GiB
+/// summary would be stored as a short one and the rebuild would render
+/// different output than the build that filled the cache. Refusing to write is
+/// the only honest option — the cache is an optimisation, so a too-large value
+/// can fall back to a full build.
+fn field_len(len: usize, what: &str) -> std::io::Result<u32> {
+    u32::try_from(len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{what} is {len} bytes, over the 4 GiB cache limit"),
+        )
+    })
 }
 
 fn path(root: &Path) -> PathBuf {

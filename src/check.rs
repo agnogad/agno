@@ -5,7 +5,7 @@
 //! against the set of files the build will produce.
 
 use crate::config::Config;
-use crate::content::{self, Content};
+use crate::content::{self, Content, Drafts};
 use crate::markdown;
 use crate::render::Templates;
 use crate::site;
@@ -14,7 +14,7 @@ use pulldown_cmark::{Event, Parser, Tag};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Report {
     pub pages: usize,
     pub links: usize,
@@ -28,7 +28,7 @@ impl Report {
     }
 }
 
-pub fn check(root: &Path, drafts: bool) -> Result<Report> {
+pub fn check(root: &Path, drafts: Drafts) -> Result<Report> {
     let cfg = Config::load(root)?;
     cfg.validate()?;
     let content = content::load(&cfg, drafts)?;

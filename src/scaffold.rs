@@ -58,10 +58,26 @@ fn main() {
 That is it. No Node, no `npm install`, no config required.
 "#;
 
-pub fn create(path: &Path, force: bool) -> Result<()> {
+/// Whether `create` may write into a directory that already has files in it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Overwrite {
+    /// Refuse, and leave the directory untouched.
+    #[default]
+    Refuse,
+    /// Write the scaffold over whatever is there.
+    Replace,
+}
+
+impl From<bool> for Overwrite {
+    fn from(force: bool) -> Self {
+        if force { Self::Replace } else { Self::Refuse }
+    }
+}
+
+pub fn create(path: &Path, overwrite: Overwrite) -> Result<()> {
     if path.exists() {
         let is_empty = fs::read_dir(path)?.next().is_none();
-        if !is_empty && !force {
+        if !is_empty && overwrite == Overwrite::Refuse {
             bail!(
                 "{} already exists and is not empty (use --force to overwrite)",
                 path.display()

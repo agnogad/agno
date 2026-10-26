@@ -1,6 +1,6 @@
 use crate::cache;
 use crate::config::{Config, MenuItem};
-use crate::content::{self, Content, Listing, Page, SortBy};
+use crate::content::{self, Content, Drafts, Listing, Page, SortBy};
 use crate::markdown::{self, TocEntry, escape_html};
 use crate::render::Templates;
 use crate::theme;
@@ -16,25 +16,33 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use walkdir::WalkDir;
 
+/// Options for a build. `Default` is an incremental build with no drafts.
+#[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
+    /// Include pages marked `draft = true`.
     pub drafts: bool,
+    /// Delete the output directory before building.
     pub clean: bool,
     /// Minify HTML output (the config file can also turn this on).
     pub minify: bool,
 }
 
+/// What a build did, and how long each phase took.
 #[derive(Debug)]
 pub struct Stats {
     pub pages: usize,
-    pub ms_total: u128,
-    pub ms_load: u128,
-    pub ms_pages: u128,
-    pub ms_rest: u128,
+    pub total: Duration,
+    /// Loading content and frontmatter.
+    pub load: Duration,
+    /// Rendering pages.
+    pub render: Duration,
+    /// Lists, feeds, static files and the manifest.
+    pub rest: Duration,
     pub output: PathBuf,
 }
 
@@ -321,8 +329,8 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     BUILD_GENERATION.fetch_add(1, Ordering::Relaxed);
 
     let phase = Instant::now();
-    let content = content::load(&cfg, opts.drafts)?;
-    let ms_load = phase.elapsed().as_millis();
+    let content = content::load(&cfg, Drafts::from(opts.drafts))?;
+    let load = phase.elapsed();
 
     let static_files = static_files(&cfg)?;
     let static_paths = static_rels(&cfg, &static_files)?;
@@ -398,7 +406,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    let ms_pages = phase.elapsed().as_millis();
+    let render = phase.elapsed();
 
     content
         .pages
@@ -521,10 +529,10 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
 
     Ok(Stats {
         pages: content.pages.len(),
-        ms_total: started.elapsed().as_millis(),
-        ms_load,
-        ms_pages,
-        ms_rest: phase.elapsed().as_millis(),
+        total: started.elapsed(),
+        load,
+        render,
+        rest: phase.elapsed(),
         output,
     })
 }
@@ -583,11 +591,17 @@ pub(crate) fn expected_outputs(
     Ok(expected)
 }
 
+/// The page size a section actually splits at, or `None` when it does not
+/// split. One `Option` drives both the page count and the chunk size, so a
+/// zero can never reach `slice::chunks` (which panics on it).
+fn split_size(section: &Listing, count: usize) -> Option<usize> {
+    section
+        .paginate_by
+        .filter(|size| *size > 0 && count > *size)
+}
+
 fn section_page_count(section: &Listing, count: usize) -> usize {
-    match section.paginate_by {
-        Some(size) if size > 0 && count > size => count.div_ceil(size),
-        _ => 1,
-    }
+    split_size(section, count).map_or(1, |size| count.div_ceil(size))
 }
 
 fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<'a>> {
@@ -609,11 +623,9 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
     });
     for section in &content.sections {
         let all = index.section(&section.key);
-        let page_size = section.paginate_by.unwrap_or(0);
-        let total = section_page_count(section, all.len());
         // One cell per section: every paginated page renders the same body.
         let content_cell = Arc::new(OnceLock::new());
-        if total <= 1 {
+        let Some(page_size) = split_size(section, all.len()) else {
             lists.push(ListSpec {
                 title: &section.title,
                 url: section.url.clone(),
@@ -628,7 +640,8 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                 candidates: &["section.html"],
             });
             continue;
-        }
+        };
+        let total = all.len().div_ceil(page_size);
         let links: Vec<PagerLink> = (1..=total)
             .map(|number| PagerLink {
                 number,
@@ -1140,33 +1153,35 @@ fn header_hash(cfg: &Config, site: &SiteView<'_>) -> Result<u64> {
         cache::fingerprint(0, if cfg.minify { b"min" } else { b"raw" }),
         cache::fingerprint(0, cfg.language.as_bytes()),
         cache::fingerprint(0, site_json.as_bytes()),
-        templates_fingerprint(&cfg.templates()),
+        templates_fingerprint(&cfg.templates())?,
     ]))
 }
 
-fn templates_fingerprint(dir: &Path) -> u64 {
+fn templates_fingerprint(dir: &Path) -> Result<u64> {
     let mut hash = cache::fingerprint(0, b"agno-templates");
     for (name, source) in theme::TEMPLATES {
         hash = cache::fingerprint(hash, name.as_bytes());
         hash = cache::fingerprint(hash, source.as_bytes());
     }
     if !dir.is_dir() {
-        return hash;
+        return Ok(hash);
     }
-    let mut files: Vec<PathBuf> = WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .collect();
+    // A template the walk cannot see would drop out of the header hash, and the
+    // cache would keep serving pages rendered from it.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(dir) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            files.push(entry.into_path());
+        }
+    }
     files.sort();
     for file in files {
         hash = cache::fingerprint(hash, file.to_string_lossy().as_bytes());
-        if let Ok(bytes) = fs::read(&file) {
-            hash = cache::fingerprint(hash, &bytes);
-        }
+        let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+        hash = cache::fingerprint(hash, &bytes);
     }
-    hash
+    Ok(hash)
 }
 
 fn read_manifest(root: &Path, output: &Path) -> Option<Manifest> {
@@ -1544,7 +1559,26 @@ fn push_url_escaped(out: &mut String, url: &str) {
     }
 }
 
-pub fn remove_all(path: &Path) -> std::io::Result<()> {
+/// Remove the build output and the fingerprint cache for the site at `root`,
+/// and return the output directory that was cleaned.
+///
+/// Both paths come from the validated config, so this cannot be aimed at an
+/// arbitrary directory. `agno clean` goes through here rather than deleting a
+/// path it computed itself.
+pub fn clean(root: &Path) -> Result<PathBuf> {
+    let cfg = Config::load(root)?;
+    cfg.validate()?;
+    let output = cfg.output();
+    let cache = root.join(".agno-cache");
+    for path in [&output, &cache] {
+        if path.exists() {
+            remove_all(path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+    Ok(output)
+}
+
+fn remove_all(path: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return fs::remove_file(path);
@@ -1552,18 +1586,28 @@ pub fn remove_all(path: &Path) -> std::io::Result<()> {
     // `DirEntry::file_type` is served from readdir's `d_type` on Linux, so this
     // avoids one `statx` per entry: a 10,000-page site has 10,000 of them and
     // they dominate deleting the output tree.
-    let entries: Vec<(PathBuf, bool)> = fs::read_dir(path)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| {
-            let is_dir = match entry.file_type() {
-                Ok(kind) => kind.is_dir(),
-                Err(_) => fs::symlink_metadata(entry.path())
-                    .map(|meta| meta.is_dir())
-                    .unwrap_or(false),
-            };
-            (entry.path(), is_dir)
-        })
-        .collect();
+    //
+    // An entry that cannot be read is remembered and reported at the end
+    // instead of being skipped: a clean that leaves files behind must not
+    // print a success message.
+    let mut entries: Vec<(PathBuf, bool)> = Vec::new();
+    let mut failed: Option<std::io::Error> = None;
+    for entry in fs::read_dir(path)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                failed.get_or_insert(err);
+                continue;
+            }
+        };
+        let is_dir = match entry.file_type() {
+            Ok(kind) => kind.is_dir(),
+            Err(_) => fs::symlink_metadata(entry.path())
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false),
+        };
+        entries.push((entry.path(), is_dir));
+    }
     entries.par_iter().try_for_each(|(entry, is_dir)| {
         if *is_dir {
             remove_all(entry)
@@ -1571,6 +1615,9 @@ pub fn remove_all(path: &Path) -> std::io::Result<()> {
             fs::remove_file(entry)
         }
     })?;
+    if let Some(err) = failed {
+        return Err(err);
+    }
     fs::remove_dir(path)
 }
 
@@ -1579,12 +1626,17 @@ fn static_files(cfg: &Config) -> Result<Vec<PathBuf>> {
     if !src.is_dir() {
         return Ok(Vec::new());
     }
-    Ok(WalkDir::new(&src)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .collect())
+    // A directory that cannot be read is an error, not an empty directory: the
+    // build would otherwise finish successfully with the assets missing from
+    // the output.
+    let mut files = Vec::new();
+    for entry in WalkDir::new(&src) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            files.push(entry.into_path());
+        }
+    }
+    Ok(files)
 }
 
 fn static_rels(cfg: &Config, files: &[PathBuf]) -> Result<Vec<String>> {

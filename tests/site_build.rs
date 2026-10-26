@@ -1,3 +1,4 @@
+use agno::content::Drafts;
 use agno::site::{BuildOptions, build};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -898,7 +899,7 @@ fn check_scans_home_and_section_bodies() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(!report.ok(), "a broken _index.md link must fail the check");
     assert!(
         report
@@ -929,7 +930,7 @@ fn check_validates_anchor_targets() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     for anchor in ["#nope", "#missing", "#fake-id", "#fenced-id"] {
         assert!(
             report.errors.iter().any(|error| error.contains(anchor)),
@@ -951,7 +952,7 @@ fn check_validates_anchor_targets() {
 #[test]
 fn check_accepts_a_clean_site() {
     let root = fixture("check-clean");
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(report.ok(), "{:?}", report.errors);
     assert_eq!(report.pages, 2);
 }
@@ -965,7 +966,7 @@ fn check_reports_broken_internal_links() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(!report.ok());
     assert!(
         report.errors.iter().any(|error| error.contains("/nope/")),
@@ -991,7 +992,7 @@ fn check_flags_a_missing_page_template() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(
         report
             .errors
@@ -1167,7 +1168,7 @@ fn page_bundle_assets_are_copied_and_checked() {
         fs::read(root.join("dist/blog/photo/photo.jpg")).unwrap(),
         b"jpeg-bytes"
     );
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(report.ok(), "{:?}", report.errors);
 
     fs::remove_file(root.join("content/blog/photo/photo.jpg")).unwrap();
@@ -1190,7 +1191,7 @@ fn check_decodes_percent_escaped_links_and_skips_other_schemes() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(report.ok(), "{:?}", report.errors);
 }
 
@@ -1212,7 +1213,7 @@ fn a_static_file_cannot_silently_replace_a_page() {
     .to_string();
     assert!(err.contains("duplicate output URL"), "{err}");
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(!report.ok());
     assert!(
         report
@@ -1263,7 +1264,7 @@ fn check_reports_source_lines_and_reference_links() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     let errors = report.errors.join("\n");
     assert!(errors.contains("lines.md:6"), "{errors}");
     assert!(errors.contains("lines.md:8"), "{errors}");
@@ -1547,7 +1548,7 @@ fn a_missing_section_template_fails_the_build_and_the_check() {
     let err = format!("{err:#}");
     assert!(err.contains("template nope.html not found"), "{err}");
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(
         report
             .errors
@@ -1623,7 +1624,7 @@ fn check_accepts_the_top_fragment() {
         "+++\ntitle = \"Hello\"\ndate = 2024-05-01\n+++\n\n[up](#top) and [bad](#nope)\n",
     )
     .unwrap();
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
 
     assert!(
         !report.errors.iter().any(|error| error.contains("#top")),
@@ -1866,4 +1867,111 @@ fn a_user_template_gets_clean_urls_and_escaped_text() {
         "{html}"
     );
     assert!(!html.contains("&#x2f;"), "{html}");
+}
+
+// ---- review findings ----------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_static_directory_fails_the_build() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("static-unreadable");
+    fs::create_dir_all(root.join("static/locked")).unwrap();
+    fs::write(root.join("static/locked/hidden.txt"), "hidden").unwrap();
+    let locked = root.join("static/locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Root ignores the mode bits, so the walk would succeed and the test would
+    // fail for the wrong reason. Nothing to assert in that environment.
+    if fs::read_dir(&locked).is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let result = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    );
+
+    // Restore the mode before asserting, so a failure still cleans up.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let err = result
+        .expect_err("an unreadable static directory must fail the build")
+        .to_string();
+    assert!(err.contains("locked"), "{err}");
+}
+
+#[test]
+fn paginate_by_zero_is_treated_as_no_pagination() {
+    let root = fixture("paginate-zero");
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\npaginate_by = 0\n+++\n",
+    )
+    .unwrap();
+    for i in 0..2 {
+        fs::write(
+            root.join(format!("content/blog/p{i}.md")),
+            format!(
+                "+++\ntitle = \"Post {i}\"\ndate = 2024-02-0{}\n+++\n\nBody.\n",
+                i + 1
+            ),
+        )
+        .unwrap();
+    }
+
+    // A zero page size used to reach `slice::chunks(0)` and panic.
+    build_incremental(&root);
+
+    assert!(root.join("dist/blog/index.html").exists());
+    assert!(!root.join("dist/blog/page/2/index.html").exists());
+}
+
+#[test]
+fn paginate_by_equal_to_the_page_count_does_not_split() {
+    let root = fixture("paginate-exact");
+    // The fixture ships one post in blog/, so two more make three.
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\npaginate_by = 3\n+++\n",
+    )
+    .unwrap();
+    for i in 0..2 {
+        fs::write(
+            root.join(format!("content/blog/p{i}.md")),
+            format!(
+                "+++\ntitle = \"Post {i}\"\ndate = 2024-02-0{} \n+++\n\nBody.\n",
+                i + 1
+            ),
+        )
+        .unwrap();
+    }
+    build_incremental(&root);
+
+    let listing = text(&root.join("dist/blog/index.html"));
+    assert!(!listing.contains("rel=\"next\""), "{listing}");
+    assert!(!root.join("dist/blog/page/2/index.html").exists());
+}
+
+#[test]
+fn clean_removes_the_output_and_the_cache() {
+    let root = fixture("clean");
+    build_incremental(&root);
+    assert!(root.join("dist").is_dir());
+    assert!(root.join(".agno-cache").is_dir());
+
+    let output = agno::site::clean(&root).unwrap();
+
+    assert_eq!(output, root.join("dist"));
+    assert!(!root.join("dist").exists(), "dist survived clean");
+    assert!(!root.join(".agno-cache").exists(), "cache survived clean");
+    assert!(
+        root.join("content/blog/hello.md").exists(),
+        "clean ate content"
+    );
 }
