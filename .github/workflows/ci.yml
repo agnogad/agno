@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,7 +59,7 @@ jobs:
           - macos-latest
           - windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -107,9 +107,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@1.88.0
+      # The toolchain is an input, not the ref. dtolnay/rust-toolchain
+      # publishes a branch per Rust release, and Dependabot reads those as
+      # versions: @1.88.0 was bumped to @1.120.0, a branch that exists in the
+      # repo but not in rustup, so the job died installing a toolchain that was
+      # never released.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
 
       - uses: Swatinem/rust-cache@v2
 

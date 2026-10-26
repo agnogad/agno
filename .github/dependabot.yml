@@ -28,3 +28,9 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+    ignore:
+      # Its refs are Rust toolchain versions, not action versions: Dependabot
+      # bumped @1.88.0 to @1.120.0, a branch that exists but is not a released
+      # Rust, and the msrv job failed installing it. The toolchain is pinned
+      # through the `toolchain` input in ci.yml, so there is nothing to bump.
+      - dependency-name: "dtolnay/rust-toolchain"
