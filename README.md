@@ -82,10 +82,17 @@ No Rust needed. Take the archive for your platform from the
 and put `agno` somewhere on your `PATH`:
 
 ```sh
-curl -L https://github.com/agnogad/agno/releases/latest/download/agno-0.3.4-x86_64-unknown-linux-gnu.tar.gz \
+# resolve the newest tag, then fetch the archive for this platform
+tag=$(curl -sIL -o /dev/null -w '%{url_effective}' \
+  https://github.com/agnogad/agno/releases/latest | sed 's|.*/tag/||')
+curl -L "https://github.com/agnogad/agno/releases/download/$tag/agno-${tag#v}-x86_64-unknown-linux-gnu.tar.gz" \
   | tar -xz
-sudo install agno-0.3.4-x86_64-unknown-linux-gnu/agno /usr/local/bin/
+sudo install "agno-${tag#v}-x86_64-unknown-linux-gnu/agno" /usr/local/bin/
 ```
+
+The tag is resolved rather than written out because the version is part of
+each archive's name: a hardcoded `/latest/download/agno-0.3.4-...` URL would
+work today and 404 the moment the next release lands.
 
 Swap `x86_64-unknown-linux-gnu` for `aarch64-apple-darwin`,
 `x86_64-apple-darwin` or `x86_64-pc-windows-msvc` (the Windows archive is a
