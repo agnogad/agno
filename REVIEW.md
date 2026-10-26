@@ -11,7 +11,7 @@ should be made explicit one way or the other. The code is in good shape — ther
 single most important thing to fix is that the build can silently omit `static/` files
 when the filesystem returns an error.
 
-Tools: `cargo fmt --check` clean, `cargo test` 46 unit + 4 fuzz + 78 integration passing,
+Tools: `cargo fmt --check` clean, `cargo test` 46 unit + 4 fuzz + 79 integration passing,
 `cargo clippy --all-targets --all-features -- -W clippy::pedantic` reports 93 warnings
 (mostly `#[must_use]` and missing `# Errors`, grouped in finding 12).
 
@@ -288,7 +288,7 @@ Applied on `fix/review-findings` (not merged):
 
 | # | Finding | Status | Test |
 |---|---|---|---|
-| 1 | `filter_map(..ok())` drops filesystem errors (`static_files`, `templates_fingerprint`, `remove_all`) | **fixed** — all three propagate; `clean` reports what it could not delete | `an_unreadable_static_directory_fails_the_build`, `clean_removes_the_output_and_the_cache` |
+| 1 | `filter_map(..ok())` drops filesystem errors (`static_files`, `templates_fingerprint`, `remove_all`) | **fixed** — all three propagate; `clean` reports what it could not delete | `an_unreadable_static_directory_fails_the_build`, `clean_reports_a_directory_it_cannot_empty` |
 | 2 | `chunks(page_size)` panics when `paginate_by = 0` | **fixed** — one `split_size` helper owns the invariant, so no call site can see `0` | `paginate_by_zero_is_treated_as_no_pagination`, `paginate_by_equal_to_the_page_count_does_not_split` |
 | 3 | `body_start_line` derives a line number from pointer subtraction | **fixed** — the loader records the line while splitting | `check_reports_source_lines_and_reference_links` |
 | 4 | `bool` parameters (`drafts`, `force`) | **fixed** — `content::Drafts` and `scaffold::Overwrite` | call sites updated |

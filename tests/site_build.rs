@@ -1975,3 +1975,35 @@ fn clean_removes_the_output_and_the_cache() {
         "clean ate content"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn clean_reports_a_directory_it_cannot_empty() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("clean-locked");
+    build_incremental(&root);
+    let locked = root.join("dist/locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::write(locked.join("file.txt"), "x").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Root can write regardless of the mode, so there is nothing to test.
+    if fs::write(locked.join("probe"), "x").is_ok() {
+        let _ = fs::remove_file(locked.join("probe"));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let result = agno::site::clean(&root);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let err = result
+        .expect_err("clean must not report success when a file survives")
+        .to_string();
+    assert!(err.contains("removing"), "{err}");
+    assert!(
+        locked.join("file.txt").exists(),
+        "the test directory was emptied anyway"
+    );
+}
