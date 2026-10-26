@@ -190,7 +190,16 @@ mod tests {
         assert!(config(".", "dist").validate().is_ok());
         assert!(config(".", ".").validate().is_err());
         assert!(config(".", "../outside").validate().is_err());
-        assert!(config(".", "/tmp/agno-outside").validate().is_err());
         assert!(config(".", "content").validate().is_err());
+
+        // An absolute path is outside the site by definition. `temp_dir` is
+        // absolute on every platform; a literal `/tmp/...` is not, because
+        // Windows needs a drive prefix before it counts as absolute.
+        let outside = std::env::temp_dir().join("agno-outside");
+        assert!(
+            config(".", outside.to_str().unwrap()).validate().is_err(),
+            "{}",
+            outside.display()
+        );
     }
 }

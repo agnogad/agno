@@ -3,16 +3,94 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  test:
+  # Formatting, lints and docs only need one platform: they are about the
+  # source, not about the target.
+  lint:
+    name: fmt, clippy, docs
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo build --release
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo doc
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # The binary is what users run, so it has to build and pass the suite on
+  # every platform agno ships to. fail-fast stays off: one platform failing
+  # should not hide whether the other two are fine.
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --release --locked
+
+      - name: cargo test
+        run: cargo test --locked
+
+      # End to end: scaffold a site, build it, check it, clean it. A generator
+      # can compile everywhere and still fail on a path separator.
+      - name: smoke test the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$PWD/target/release/agno"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="$bin.exe"; fi
+          "$bin" --version
+          cd "$RUNNER_TEMP"
+          rm -rf smoke
+          "$bin" new smoke
+          cd smoke
+          "$bin" build --stats
+          "$bin" check
+          test -f dist/index.html
+          "$bin" clean
+          test ! -d dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agno-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            target/release/agno
+            target/release/agno.exe
+          if-no-files-found: error
+          retention-days: 14
