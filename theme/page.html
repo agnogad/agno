@@ -20,8 +20,8 @@
 </article>
 {% if page.prev or page.next %}
 <nav class="page-nav">
-  {% if page.prev %}<a rel="prev" href="{{ page.prev.url|url }}">← {{ page.prev.title }}</a>{% else %}<span></span>{% endif %}
-  {% if page.next %}<a rel="next" href="{{ page.next.url|url }}">{{ page.next.title }} →</a>{% else %}<span></span>{% endif %}
+  {% if page.prev %}<a rel="prev" href="{{ page.prev.url }}">← {{ page.prev.title }}</a>{% else %}<span></span>{% endif %}
+  {% if page.next %}<a rel="next" href="{{ page.next.url }}">{{ page.next.title }} →</a>{% else %}<span></span>{% endif %}
 </nav>
 {% endif %}
 {% endblock %}

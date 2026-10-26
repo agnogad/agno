@@ -1843,3 +1843,27 @@ fn a_base_url_without_a_scheme_is_an_error() {
     .to_string();
     assert!(err.contains("base_url must be an absolute"), "{err}");
 }
+
+#[test]
+fn a_user_template_gets_clean_urls_and_escaped_text() {
+    let root = fixture("user-escaping");
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/page.html"),
+        "{% extends \"base.html\" %}{% block content %}<a id=\"u\" href=\"{{ page.url }}\">{{ page.title }}</a><div id=\"c\">{{ page.content|safe }}</div>{% endblock %}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/amp.md"),
+        "+++\ntitle = \"A & B <c>\"\ndate = 2024-06-01\n+++\n\nText & more.\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let html = text(&root.join("dist/blog/amp/index.html"));
+    assert!(
+        html.contains("<a id=\"u\" href=\"/blog/amp/\">A &amp; B &lt;c&gt;</a>"),
+        "{html}"
+    );
+    assert!(!html.contains("&#x2f;"), "{html}");
+}

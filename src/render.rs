@@ -1,7 +1,9 @@
 use crate::content::slugify;
+use crate::markdown;
 use crate::theme;
 use anyhow::{Context, Result};
-use minijinja::{AutoEscape, Environment, Template, Value, path_loader};
+use minijinja::{AutoEscape, Environment, Error, ErrorKind, Output, Template, Value, path_loader};
+use std::fmt::Write as _;
 use std::path::Path;
 
 pub struct Templates {
@@ -15,15 +17,21 @@ impl Templates {
         // metadata check for edited sources buys nothing and costs syscalls.
         env.set_auto_reload(false);
         env.set_auto_escape_callback(|_| AutoEscape::Html);
+        // MiniJinja's HTML escaper also turns every `/` into `&#x2f;`. Browsers
+        // decode it, so links still work, but it triples the size of every path
+        // a template prints and mangles JSON-LD or a canonical URL. Slashes are
+        // not special in text or in a quoted attribute, so only the characters
+        // that are get escaped.
+        env.set_formatter(|out, state, value| {
+            if *state.auto_escape() == AutoEscape::Html && !value.is_safe() {
+                write_html_escaped(out, value)
+            } else {
+                minijinja::escape_formatter(out, state, value)
+            }
+        });
         env.add_filter("slugify", |value: String| slugify(&value));
         env.add_filter("starts_with", |value: String, prefix: String| {
             value.starts_with(&prefix)
-        });
-        env.add_filter("url", |value: Value| {
-            // Taking a `Value` rather than a `String` keeps an undefined
-            // variable rendering as an empty attribute, the way `safe` does,
-            // instead of failing the whole page.
-            Value::from_safe_string(escape_url(&value.to_string()))
         });
         for (name, source) in theme::TEMPLATES {
             if !dir.join(name).is_file() {
@@ -61,44 +69,75 @@ impl Templates {
     }
 }
 
-/// Escape a URL for use in an HTML attribute, leaving `/` alone.
-///
-/// The `Html` autoescape turns every `/` into `&#x2f;`, which browsers decode
-/// but which triples the size of a path like `/blog/hello/`. A URL only needs
-/// the characters that could end the attribute or start markup escaped, so the
-/// `url` filter does that and marks the result safe.
-fn escape_url(url: &str) -> String {
-    let mut out = String::with_capacity(url.len() + 8);
-    for ch in url.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
+/// Escape a value for HTML text or a quoted attribute, leaving `/` alone.
+fn write_html_escaped(out: &mut Output, value: &Value) -> Result<(), Error> {
+    let write_error = |_| Error::new(ErrorKind::WriteFailure, "failed to write output");
+    // A string can be escaped straight into the output; anything else is
+    // formatted first, which costs an allocation but is rare.
+    let mut owned;
+    let text = match value.as_str() {
+        Some(text) => text,
+        None => {
+            owned = String::new();
+            write!(&mut owned, "{value}").map_err(write_error)?;
+            &owned
         }
+    };
+    if !text
+        .as_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        return out.write_str(text).map_err(write_error);
     }
-    out
+    let mut escaped = String::with_capacity(text.len() + 16);
+    markdown::push_escaped(&mut escaped, text);
+    out.write_str(&escaped).map_err(write_error)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::escape_url;
+    use super::Templates;
+    use minijinja::context;
+    use std::fs;
+
+    fn render(template: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "agno-render-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("t.html"), template).unwrap();
+        let templates = Templates::load(&dir).unwrap();
+        let rendered = templates
+            .render(
+                "t.html",
+                context! { url => "/blog/hello-world/", title => "a & b <c>", body => "<p>raw</p>" },
+            )
+            .unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        rendered
+    }
 
     #[test]
     fn a_path_keeps_its_slashes() {
-        assert_eq!(escape_url("/blog/hello-world/"), "/blog/hello-world/");
-        assert_eq!(
-            escape_url("https://example.com/a/b"),
-            "https://example.com/a/b"
-        );
+        assert_eq!(render("{{ url }}"), "/blog/hello-world/");
     }
 
     #[test]
     fn query_ampersands_and_quotes_are_still_escaped() {
-        assert_eq!(escape_url("/s?q=a&b=1"), "/s?q=a&amp;b=1");
-        assert_eq!(escape_url("/a\"><script>"), "/a&quot;&gt;&lt;script&gt;");
-        assert_eq!(escape_url("/it's"), "/it&#x27;s");
+        assert_eq!(render("{{ title }}"), "a &amp; b &lt;c&gt;");
+    }
+
+    #[test]
+    fn safe_values_are_not_escaped() {
+        assert_eq!(render("{{ body|safe }}"), "<p>raw</p>");
+    }
+
+    #[test]
+    fn a_missing_value_still_renders_empty() {
+        assert_eq!(render("[{{ nope }}]"), "[]");
     }
 }

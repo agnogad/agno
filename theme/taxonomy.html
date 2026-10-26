@@ -5,7 +5,7 @@
 {% if page.content %}<div class="content">{{ page.content|safe }}</div>{% endif %}
 <ul class="term-list">
   {% for term in page.terms %}
-  <li><a href="{{ term.url|url }}">{{ term.name }}</a> <span class="count">{{ term.count }}</span></li>
+  <li><a href="{{ term.url }}">{{ term.name }}</a> <span class="count">{{ term.count }}</span></li>
   {% endfor %}
 </ul>
 {% endblock %}

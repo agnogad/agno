@@ -252,8 +252,8 @@ chapter and a blog walks newest to oldest. Both are `null` at the ends of the
 section.
 
 ```html
-{% if page.prev %}<a rel="prev" href="{{ page.prev.url|safe }}">{{ page.prev.title }}</a>{% endif %}
-{% if page.next %}<a rel="next" href="{{ page.next.url|safe }}">{{ page.next.title }}</a>{% endif %}
+{% if page.prev %}<a rel="prev" href="{{ page.prev.url }}">{{ page.prev.title }}</a>{% endif %}
+{% if page.next %}<a rel="next" href="{{ page.next.url }}">{{ page.next.title }}</a>{% endif %}
 ```
 
 Each neighbour is `{ title, url, date_display }`. Changing the order, adding a
@@ -322,15 +322,16 @@ headings are disambiguated with a numeric suffix.
 The default templates are `base.html`, `page.html`, `section.html`,
 `index.html`, `taxonomy.html`, and `404.html`. Add `tag.html` or `category.html`
 to use a dedicated layout for those term pages. Filters include `slugify`,
-`starts_with`, `url`, `safe`, and the MiniJinja built-ins.
+`starts_with`, `safe`, and the MiniJinja built-ins.
 
-Autoescaping is on for HTML, which also escapes every `/` in a value into
-`&#x2f;`. Pipe URLs through `url` to escape only what could break out of an
-attribute, so `href="/blog/hello/"` stays readable:
+Autoescaping is on for HTML, and it escapes only the characters that are
+special in text or in a quoted attribute, so a path stays readable:
 
 ```html
-<a href="{{ page.url|url }}">{{ page.title }}</a>
+<a href="{{ page.url }}">{{ page.title }}</a>
 ```
+
+`page.content` is already rendered HTML, so it still needs `|safe`.
 
 ```html
 {% extends "base.html" %}

@@ -1126,10 +1126,16 @@ fn manifest_path(root: &Path, output: &Path) -> PathBuf {
 }
 
 /// Everything a page render depends on except the page source itself.
+/// Bumped when a change alters rendered output without changing a template, a
+/// config value or the site context, so an existing cache does not keep pages
+/// from the previous renderer. 2: HTML escaping no longer escapes `/`.
+const RENDER_REVISION: u64 = 2;
+
 fn header_hash(cfg: &Config, site: &SiteView<'_>) -> Result<u64> {
     let site_json = serde_json::to_string(site).context("serializing site context")?;
     Ok(cache::combine(&[
         cache::fingerprint(0, env!("CARGO_PKG_VERSION").as_bytes()),
+        cache::fingerprint(0, &RENDER_REVISION.to_le_bytes()),
         cache::fingerprint(0, if cfg.highlight { b"on" } else { b"off" }),
         cache::fingerprint(0, if cfg.minify { b"min" } else { b"raw" }),
         cache::fingerprint(0, cfg.language.as_bytes()),
