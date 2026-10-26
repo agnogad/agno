@@ -102,28 +102,25 @@ from a laptop.
 
 #### Linux: gnu or musl
 
-There are two Linux archives. They perform about the same; pick on libc, not
-on speed.
+There are two Linux archives; pick on libc first, then on speed.
 
 | | `x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-musl` |
 |---|---|---|
 | runs on | glibc 2.34+ (Ubuntu 22.04, Debian 12, RHEL 9) | any x86_64 Linux, fully static |
-| 3000 pages, 12 threads | 0.17 s | 0.21 s |
-| 3000 pages, 1 thread | 0.32 s | 0.38 s |
+| 3000 pages, 12 threads | 0.19 s | 0.25 s |
+| 3000 pages, 1 thread | 0.32 s | 0.35 s |
 
-Take **gnu** if your distribution is new enough — it is around 20% ahead.
+Take **gnu** if your distribution is new enough — it is roughly 20% ahead.
 Take **musl** for an Alpine or `scratch` container, or for anything older than
 glibc 2.34, where the gnu archive fails at startup with
 `GLIBC_2.34 not found`.
 
 Both ship mimalloc rather than the system allocator, which matters most on
 musl: musl's malloc takes a global lock, so without it the static build got
-*slower* as you gave it cores (0.40 s on one thread, 0.91 s on twelve). With
-mimalloc the two builds are within 20% of each other at every thread count.
+*slower* as you gave it cores — 1.07 s on twelve threads against 0.14 s now.
 
-The gnu binary needs glibc 2.34 or newer; on Ubuntu 20.04 or Debian 11 it fails
-at startup with `GLIBC_2.34 not found`. Use the musl archive there, or install
-from crates.io, which builds against the system toolchain.
+Medians of nine interleaved cold builds of a 3000-page site on a 12-core
+laptop, so read the figures as ratios rather than absolutes.
 
 ### Install from crates.io
 
