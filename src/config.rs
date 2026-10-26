@@ -54,6 +54,11 @@ impl Default for Config {
 
 impl Config {
     pub fn load(root: &Path) -> Result<Self> {
+        // Without this, `agno build -r typo` creates the directory and an empty
+        // site inside it instead of reporting the mistake.
+        if !root.is_dir() {
+            bail!("site root {} does not exist", root.display());
+        }
         let path = root.join("agno.toml");
         let mut cfg: Config = if path.is_file() {
             let src = std::fs::read_to_string(&path)

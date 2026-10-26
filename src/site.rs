@@ -1,7 +1,7 @@
 use crate::cache;
 use crate::config::{Config, MenuItem};
 use crate::content::{self, Content, Listing, Page, SortBy};
-use crate::markdown::{self, TocEntry, escape_html, push_escaped};
+use crate::markdown::{self, TocEntry, escape_html};
 use crate::render::Templates;
 use crate::theme;
 use anyhow::{Context, Result, bail};
@@ -160,6 +160,8 @@ struct ListSpec<'a> {
     pages: Vec<&'a Page>,
     paginator: Option<PagerView>,
     terms: Vec<TermView<'a>>,
+    /// `template` from the section's or home page's `_index.md`.
+    template: Option<&'a str>,
     candidates: &'static [&'static str],
 }
 
@@ -278,7 +280,8 @@ fn term_index(
 
 /// Order one section's pages. `date` leaves the global newest-first order
 /// alone; the other two re-sort, and a stable sort keeps the date order as the
-/// tie-breaker for equal weights.
+/// tie-breaker for equal weights. The URL is the last key so a section renders
+/// the same way on every machine.
 fn sort_pages(pages: &mut [&Page], sort_by: SortBy) {
     match sort_by {
         SortBy::Date => {}
@@ -287,9 +290,12 @@ fn sort_pages(pages: &mut [&Page], sort_by: SortBy) {
                 page.weight,
                 std::cmp::Reverse(page.date),
                 page.title.to_lowercase(),
+                page.url.clone(),
             )
         }),
-        SortBy::Title => pages.sort_by_cached_key(|page| page.title.to_lowercase()),
+        SortBy::Title => {
+            pages.sort_by_cached_key(|page| (page.title.to_lowercase(), page.url.clone()))
+        }
     }
 }
 
@@ -355,7 +361,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let previous = if opts.clean {
         None
     } else {
-        read_manifest(root)
+        read_manifest(root, &output)
     };
     let mut expected = expected_outputs(&cfg, &content, &static_paths)?;
     if let Some(previous) = &previous {
@@ -429,13 +435,16 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let phase = Instant::now();
     let list_names: Vec<String> = lists
         .iter()
-        .map(|list| {
-            templates.first(list.candidates).with_context(|| {
+        .map(|list| match list.template {
+            // An explicit `template` wins and is reported by `render_list` if
+            // it does not exist, the same way a page's override is.
+            Some(name) => Ok(name.to_string()),
+            None => templates.first(list.candidates).with_context(|| {
                 format!(
                     "no template found for {} among {:?}",
                     list.url, list.candidates
                 )
-            })
+            }),
         })
         .collect::<Result<Vec<_>>>()?;
     let list_keys: Vec<u64> = lists
@@ -591,6 +600,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
         pages: home_pages,
         paginator: None,
         terms: Vec::new(),
+        template: content.home.template.as_deref(),
         candidates: &["index.html"],
     });
     for section in &content.sections {
@@ -610,6 +620,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                 pages: all.to_vec(),
                 paginator: None,
                 terms: Vec::new(),
+                template: section.template.as_deref(),
                 candidates: &["section.html"],
             });
             continue;
@@ -648,6 +659,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                     links,
                 }),
                 terms: Vec::new(),
+                template: section.template.as_deref(),
                 candidates: &["section.html"],
             });
         }
@@ -672,6 +684,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                     count: index.terms(kind, &term.key).len(),
                 })
                 .collect(),
+            template: None,
             candidates: &["taxonomy.html"],
         });
     }
@@ -686,6 +699,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
             pages: index.tag(&tag.key).to_vec(),
             paginator: None,
             terms: Vec::new(),
+            template: None,
             candidates: &["tag.html", "section.html"],
         });
     }
@@ -700,6 +714,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
             pages: index.category(&category.key).to_vec(),
             paginator: None,
             terms: Vec::new(),
+            template: None,
             candidates: &["category.html", "tag.html", "section.html"],
         });
     }
@@ -713,6 +728,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
         pages: Vec::new(),
         paginator: None,
         terms: Vec::new(),
+        template: None,
         candidates: &["404.html"],
     });
     lists
@@ -1096,8 +1112,13 @@ fn validate_urls(cfg: &Config, content: &Content, static_paths: &[String]) -> Re
     Ok(())
 }
 
-fn manifest_path(root: &Path) -> PathBuf {
-    root.join(".agno-cache").join("outputs.json")
+/// One manifest per output directory: switching `output_dir` and back must not
+/// lose the record of what the earlier build wrote, or the stale sweep below
+/// skips files that no longer have a source.
+fn manifest_path(root: &Path, output: &Path) -> PathBuf {
+    let tag = cache::fingerprint(0, output.to_string_lossy().as_bytes());
+    root.join(".agno-cache")
+        .join(format!("outputs-{tag:016x}.json"))
 }
 
 /// Everything a page render depends on except the page source itself.
@@ -1138,8 +1159,8 @@ fn templates_fingerprint(dir: &Path) -> u64 {
     hash
 }
 
-fn read_manifest(root: &Path) -> Option<Manifest> {
-    let src = fs::read_to_string(manifest_path(root)).ok()?;
+fn read_manifest(root: &Path, output: &Path) -> Option<Manifest> {
+    let src = fs::read_to_string(manifest_path(root, output)).ok()?;
     serde_json::from_str(&src).ok()
 }
 
@@ -1157,7 +1178,7 @@ fn write_manifest(
     {
         return Ok(());
     }
-    let path = manifest_path(root);
+    let path = manifest_path(root, output);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
@@ -1384,14 +1405,16 @@ fn rss(cfg: &Config, pages: &[Page], summaries: &HashMap<&str, &str>) -> String 
         .filter(|page| page.date.is_some())
         .take(cfg.rss_items)
     {
-        let link = cfg.absolute(&page.url);
+        let link = {
+            let mut escaped = String::with_capacity(page.url.len() + cfg.base_url.len() + 8);
+            push_url_escaped(&mut escaped, &cfg.absolute(&page.url));
+            escaped
+        };
         let pub_date = page.rss_date();
         let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
         items.push_str(&format!(
-            "<item><title>{}</title><link>{}</link><guid isPermaLink=\"true\">{}</guid>{}<description>{}</description></item>",
+            "<item><title>{}</title><link>{link}</link><guid isPermaLink=\"true\">{link}</guid>{}<description>{}</description></item>",
             escape_html(&page.title),
-            escape_html(&link),
-            escape_html(&link),
             if pub_date.is_empty() {
                 String::new()
             } else {
@@ -1431,7 +1454,15 @@ fn search_index(pages: &[Page], summaries: &HashMap<&str, &str>) -> Result<Strin
 fn sitemap(cfg: &Config, content: &Content) -> String {
     let count = content.pages.len() + content.sections.len() + content.tags.len() + 1;
     let mut urls = String::with_capacity(count * 96);
-    push_url(&mut urls, cfg, "/", content.home.date);
+    // Pages report their modification date when they have one; the home page
+    // used to report its publication date, which disagreed with every other
+    // entry in the same sitemap.
+    push_url(
+        &mut urls,
+        cfg,
+        "/",
+        content.home.updated.or(content.home.date),
+    );
     for page in &content.pages {
         push_url(&mut urls, cfg, &page.url, page.updated.or(page.date));
     }
@@ -1462,8 +1493,8 @@ fn sitemap(cfg: &Config, content: &Content) -> String {
 
 fn push_url(out: &mut String, cfg: &Config, url: &str, date: Option<OffsetDateTime>) {
     out.push_str("<url><loc>");
-    push_escaped(out, &cfg.base_url);
-    push_escaped(out, url);
+    push_url_escaped(out, &cfg.base_url);
+    push_url_escaped(out, url);
     out.push_str("</loc>");
     if let Some(lastmod) = date.and_then(|value| value.format(&Rfc3339).ok()) {
         out.push_str("<lastmod>");
@@ -1471,6 +1502,36 @@ fn push_url(out: &mut String, cfg: &Config, url: &str, date: Option<OffsetDateTi
         out.push_str("</lastmod>");
     }
     out.push_str("</url>");
+}
+
+const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Append a URL to an XML document: percent-encode the characters a URI cannot
+/// carry literally, then XML-escape what is left.
+///
+/// A `url` frontmatter value may contain a space, and `<loc>https://host/my
+/// page/</loc>` is not a valid sitemap entry even though it is well-formed XML.
+fn push_url_escaped(out: &mut String, url: &str) {
+    for ch in url.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            ch if ch.is_ascii_control()
+                || matches!(ch, ' ' | '`' | '{' | '|' | '}' | '\\' | '^') =>
+            {
+                let mut buffer = [0u8; 4];
+                for byte in ch.encode_utf8(&mut buffer).bytes() {
+                    out.push('%');
+                    out.push(HEX[usize::from(byte >> 4)] as char);
+                    out.push(HEX[usize::from(byte & 0xf)] as char);
+                }
+            }
+            ch => out.push(ch),
+        }
+    }
 }
 
 pub fn remove_all(path: &Path) -> std::io::Result<()> {

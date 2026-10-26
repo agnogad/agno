@@ -160,8 +160,9 @@ also drops the cache.
 `agno check` resolves every internal Markdown link and image against the files
 the build will produce, and fails with exit code 1 when something is missing.
 It scans page bodies and `_index.md` landing pages, follows `#fragment`
-targets to the headings they name, and reports pages whose `template` does not
-exist and pages without a date.
+targets to the headings they name (`#top` always resolves, as browsers scroll
+to the top for it), and reports pages whose `template` does not exist and
+pages without a date.
 
 ```sh
 $ agno check
@@ -211,21 +212,23 @@ Any other frontmatter field is available to templates as
 `page.extra.<name>`.
 
 Section indexes (`content/blog/_index.md`) additionally accept `paginate_by`,
-which splits the section listing into pages of that many cards, and `sort_by`,
-which decides the order:
+which splits the section listing into pages of that many cards, `sort_by`,
+which decides the order, and `template`, which renders the listing with a
+layout other than `section.html`:
 
 ```toml
 +++
 title = "Blog"
 paginate_by = 10
 sort_by = "weight"
+template = "blog.html"
 +++
 ```
 
 Page 1 stays at `/blog/`; the rest live at `/blog/page/2/`, `/blog/page/3/`,
 and so on, and are linked through `page.paginator` in `section.html`. The home
-page (`content/_index.md`) takes `sort_by` too; pagination is a section
-feature.
+page (`content/_index.md`) takes `sort_by` and `template` too; pagination is a
+section feature. `agno check` reports a `template` that does not exist.
 
 ### Ordering and navigation
 
@@ -263,6 +266,9 @@ its directory into a page bundle:
 ```text
 content/blog/hello/index.md  →  /blog/hello/
 ```
+
+Content files end in `.md` or `.markdown`, in any case, so `POST.MD` and
+`Index.md` are picked up too.
 
 Filenames can start with a date. `2024-05-01-hello.md` sets the date and derives
 the slug automatically. URL path segments are slugified, `slug` overrides the

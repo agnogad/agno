@@ -88,6 +88,8 @@ pub struct Listing {
     /// How this section orders its pages; `date` unless `_index.md` says
     /// otherwise.
     pub sort_by: SortBy,
+    /// Template that renders this section instead of `section.html`.
+    pub template: Option<String>,
     /// Remaining frontmatter, exposed to list templates as `page.extra`.
     pub extra: Value,
 }
@@ -158,6 +160,7 @@ impl Listing {
             source: PathBuf::new(),
             paginate_by: None,
             sort_by: SortBy::Date,
+            template: None,
             extra: Value::Object(Default::default()),
         }
     }
@@ -204,8 +207,16 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
         .map(|path| load_page(&root, path, include_drafts, &cfg.language))
         .collect();
     let mut pages: Vec<Page> = loaded?.into_iter().flatten().collect();
-    // Sort keys are computed once per page instead of once per comparison.
-    pages.sort_by_cached_key(|page| (std::cmp::Reverse(page.date), page.title.to_lowercase()));
+    // Sort keys are computed once per page instead of once per comparison. The
+    // URL breaks ties so two pages with the same date and title keep the same
+    // order on every machine, whatever order the directory walk returned.
+    pages.sort_by_cached_key(|page| {
+        (
+            std::cmp::Reverse(page.date),
+            page.title.to_lowercase(),
+            page.url.clone(),
+        )
+    });
 
     let (home, home_sort_by) = load_home(cfg, &index_paths)?;
 
@@ -348,6 +359,20 @@ fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<(Pa
     page.source = path.clone();
     page.description = field_str(&fm, "description").unwrap_or_else(|| cfg.description.clone());
     page.summary = field_str(&fm, "summary").unwrap_or_default();
+    page.template = field_str(&fm, "template");
+    // The home page has no filename date, but its frontmatter dates are real:
+    // they feed `<lastmod>` in the sitemap and `page.date` in the template.
+    let date = field_str(&fm, "date").and_then(|s| parse_date(&s));
+    let updated = field_str(&fm, "updated").and_then(|s| parse_date(&s));
+    let (date_text, datetime, date_display, updated_text, updated_display) =
+        date_fields(date, updated, &cfg.language);
+    page.date = date;
+    page.updated = updated;
+    page.date_text = date_text;
+    page.datetime = datetime;
+    page.date_display = date_display;
+    page.updated_text = updated_text;
+    page.updated_display = updated_display;
     page.extra = fm;
     page.body_line = body_start_line(&src, body);
     page.body = body.to_string();
@@ -385,6 +410,7 @@ fn load_listing(index_paths: &HashMap<String, PathBuf>, key: &str, url: &str) ->
         source: path.clone(),
         paginate_by: field_usize(&fm, "paginate_by").filter(|size| *size > 0),
         sort_by,
+        template: field_str(&fm, "template"),
         extra: fm,
     })
 }
@@ -417,7 +443,7 @@ fn load_page(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let is_bundle_index = file_stem == "index";
+    let is_bundle_index = file_stem.eq_ignore_ascii_case("index");
     let parent = rel_no_ext
         .rsplit_once('/')
         .map(|(head, _)| head.to_string())
@@ -429,17 +455,8 @@ fn load_page(
         .and_then(|s| parse_date(&s))
         .or_else(|| filename_date.and_then(parse_date));
     let updated = field_str(&fm, "updated").and_then(|s| parse_date(&s));
-    let date_text = date.map(ymd).unwrap_or_default();
-    let datetime = date
-        .and_then(|d| d.format(&Rfc3339).ok())
-        .unwrap_or_default();
-    let date_display = date
-        .map(|d| format_date_display(d, language))
-        .unwrap_or_default();
-    let updated_text = updated.map(ymd).unwrap_or_default();
-    let updated_display = updated
-        .map(|d| format_date_display(d, language))
-        .unwrap_or_default();
+    let (date_text, datetime, date_display, updated_text, updated_display) =
+        date_fields(date, updated, language);
     let word_count = body.split_whitespace().count();
     let reading_minutes = if word_count == 0 {
         0
@@ -543,8 +560,8 @@ fn load_page(
         weight: field_i64(&fm, "weight").unwrap_or(0),
         description,
         summary,
-        tags: field_string_list(&fm, "tags"),
-        categories: field_string_list(&fm, "categories"),
+        tags: term_list(&fm, "tags"),
+        categories: term_list(&fm, "categories"),
         aliases: deduped,
         template: field_str(&fm, "template"),
         extra: fm,
@@ -553,6 +570,26 @@ fn load_page(
         content_key: crate::cache::fingerprint(0, src.as_bytes()),
         section,
     }))
+}
+
+/// The five rendered date strings a page exposes, derived once from its
+/// `date` and `updated` values.
+fn date_fields(
+    date: Option<OffsetDateTime>,
+    updated: Option<OffsetDateTime>,
+    language: &str,
+) -> (String, String, String, String, String) {
+    (
+        date.map(ymd).unwrap_or_default(),
+        date.and_then(|d| d.format(&Rfc3339).ok())
+            .unwrap_or_default(),
+        date.map(|d| format_date_display(d, language))
+            .unwrap_or_default(),
+        updated.map(ymd).unwrap_or_default(),
+        updated
+            .map(|d| format_date_display(d, language))
+            .unwrap_or_default(),
+    )
 }
 
 fn empty_page(title: String, url: String) -> Page {
@@ -590,16 +627,33 @@ fn is_hidden(entry: &walkdir::DirEntry) -> bool {
     entry.file_name().to_string_lossy().starts_with('.') && entry.depth() > 0
 }
 
+/// True when the file ends in `.md` or `.markdown`, in any case: `POST.MD` is
+/// an ordinary name on a case-insensitive filesystem, and treating it as an
+/// asset made the page disappear without a word.
 fn is_markdown(name: &str) -> bool {
-    name.ends_with(".md") || name.ends_with(".markdown")
+    match name.rsplit_once('.') {
+        Some((_, ext)) => ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"),
+        None => false,
+    }
 }
 
 fn is_index(name: &str) -> bool {
-    name == "_index.md" || name == "_index.markdown"
+    is_named(name, "_index")
 }
 
 fn is_bundle_index(name: &str) -> bool {
-    name == "index.md" || name == "index.markdown"
+    is_named(name, "index")
+}
+
+/// `_index.md` for a given stem, with a Markdown extension in any case.
+fn is_named(name: &str, stem: &str) -> bool {
+    match name.rsplit_once('.') {
+        Some((head, ext)) => {
+            head.eq_ignore_ascii_case(stem)
+                && (ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
+        }
+        None => false,
+    }
 }
 
 /// The source line that `body` starts on. `split_frontmatter` returns a
@@ -633,11 +687,21 @@ pub fn split_frontmatter(src: &str) -> Result<(Value, &str)> {
                 .or_else(|| rest.strip_prefix('\n'))
                 .unwrap_or(rest);
             let needle = if is_toml { "\n+++" } else { "\n---" };
-            if let Some(pos) = rest.find(needle) {
+            // The usual case: the closing delimiter is on a later line. An
+            // empty block (`---` immediately followed by `---`) puts it on the
+            // first one, which `find` cannot see because there is no leading
+            // newline to match.
+            let pos = rest.find(needle).or_else(|| {
+                let after = rest.strip_prefix(delim)?;
+                (after.is_empty() || after.starts_with(['\r', '\n'])).then_some(0)
+            });
+            if let Some(pos) = pos {
                 // The delimiter search lands on the LF; a CRLF file leaves a
                 // trailing CR on the frontmatter, which TOML rejects.
                 let front = rest[..pos].trim_end_matches('\r');
-                let body = &rest[pos + delim.len() + 1..];
+                // A file that ends right after the closing delimiter has no
+                // body at all, hence the fallback.
+                let body = rest.get(pos + delim.len() + 1..).unwrap_or("");
                 let value: Value = if is_toml {
                     let parsed: toml::Value =
                         toml::from_str(front).with_context(|| "invalid TOML frontmatter")?;
@@ -645,15 +709,36 @@ pub fn split_frontmatter(src: &str) -> Result<(Value, &str)> {
                 } else {
                     serde_yaml_ng::from_str(front).with_context(|| "invalid YAML frontmatter")?
                 };
+                // A file that merely starts with `---` and has another `---`
+                // further down parses as a YAML scalar or sequence. Treating
+                // that as empty frontmatter silently dropped the text between
+                // the two rules, so it is an error instead. An empty block
+                // (`---\n---`) is still fine: there is nothing to lose.
                 let value = match value {
                     Value::Object(_) => value,
-                    _ => Value::Object(Default::default()),
+                    Value::Null => Value::Object(Default::default()),
+                    other => bail!(
+                        "frontmatter must be a mapping of keys to values, found {}",
+                        json_kind(&other)
+                    ),
                 };
                 return Ok((value, body.trim_start_matches(['\r', '\n'])));
             }
         }
     }
     Ok((Value::Object(Default::default()), src))
+}
+
+/// Human name for a frontmatter value's shape, used in error messages.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "a list",
+        Value::Object(_) => "a table",
+    }
 }
 
 fn toml_to_json(value: toml::Value) -> Value {
@@ -731,6 +816,25 @@ fn field_string_list(fm: &Value, key: &str) -> Vec<String> {
         Some(Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
     }
+}
+
+/// Tags or categories as written, minus terms that would share a term page.
+///
+/// "Rust" and "rust" slugify to the same URL, so keeping both would render two
+/// links to one page; a term that slugifies to nothing has no page at all and
+/// would render `/tags//`.
+fn term_list(fm: &Value, key: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    let mut slugs: Vec<String> = Vec::new();
+    for term in field_string_list(fm, key) {
+        let slug = slugify(&term);
+        if slug.is_empty() || slugs.contains(&slug) {
+            continue;
+        }
+        slugs.push(slug);
+        terms.push(term);
+    }
+    terms
 }
 
 /// `YYYY-MM-DD`, the machine-readable date used by `<time datetime>` and feeds.
@@ -932,6 +1036,28 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_frontmatter_block_is_allowed() {
+        let (fm, body) = split_frontmatter("---\n---\n\nBody").unwrap();
+        assert!(fm.as_object().unwrap().is_empty());
+        assert_eq!(body, "Body");
+    }
+
+    #[test]
+    fn frontmatter_that_is_not_a_mapping_is_rejected() {
+        // A document that starts with a rule and has another one further down
+        // is not frontmatter; silently dropping the text between them was the
+        // bug this guards.
+        let err = split_frontmatter("---\nSome text\n---\nMore\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be a mapping"), "{err}");
+        let err = split_frontmatter("---\n- a\n- b\n---\nMore\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("a list"), "{err}");
+    }
+
+    #[test]
     fn slugify_handles_turkish() {
         assert_eq!(slugify("Çığır Açan Şeyler"), "cigir-acan-seyler");
         assert_eq!(slugify("  Hello, World!  "), "hello-world");
@@ -951,5 +1077,23 @@ mod tests {
             (Some("2024-05-01"), "post")
         );
         assert_eq!(split_date_prefix("post"), (None, "post"));
+    }
+
+    #[test]
+    fn markdown_names_are_matched_without_regard_to_case() {
+        assert!(is_markdown("post.md"));
+        assert!(is_markdown("POST.MD"));
+        assert!(is_markdown("Post.Markdown"));
+        assert!(!is_markdown("post.txt"));
+        assert!(!is_markdown("post"));
+
+        assert!(is_index("_index.md"));
+        assert!(is_index("_INDEX.MD"));
+        assert!(!is_index("index.md"));
+
+        assert!(is_bundle_index("index.md"));
+        assert!(is_bundle_index("Index.MD"));
+        assert!(!is_bundle_index("_index.md"));
+        assert!(!is_bundle_index("indexes.md"));
     }
 }

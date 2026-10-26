@@ -575,8 +575,9 @@ fn a_missing_page_template_is_an_error() {
             minify: false,
         },
     )
-    .unwrap_err()
-    .to_string();
+    .map(|_| ())
+    .unwrap_err();
+    let err = format!("{err:#}");
     assert!(err.contains("template nope.html not found"), "{err}");
 }
 
@@ -1049,7 +1050,7 @@ fn a_no_op_rebuild_leaves_generated_files_untouched() {
     build_incremental(&root);
     let rss = root.join("dist/rss.xml");
     let sitemap = root.join("dist/sitemap.xml");
-    let manifest = root.join(".agno-cache/outputs.json");
+    let manifest = manifest_of(&root);
     let before = (modified(&rss), modified(&sitemap), modified(&manifest));
 
     build_incremental(&root);
@@ -1059,6 +1060,24 @@ fn a_no_op_rebuild_leaves_generated_files_untouched() {
         (modified(&rss), modified(&sitemap), modified(&manifest)),
         "a rebuild rewrote a feed or the manifest even though nothing changed"
     );
+}
+
+/// The build manifest is stored per output directory, so its file name carries
+/// a hash of that path.
+fn manifest_of(root: &Path) -> PathBuf {
+    let cache = root.join(".agno-cache");
+    let mut found: Vec<PathBuf> = fs::read_dir(&cache)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("outputs-") && name.ends_with(".json"))
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "expected exactly one build manifest");
+    found.pop().unwrap()
 }
 
 #[test]
@@ -1475,4 +1494,250 @@ fn inserting_a_page_rerenders_its_neighbours() {
     assert!(middle.contains("rel=\"next\" href=\"/docs/c/\""));
     let last = text(&root.join("dist/docs/c/index.html"));
     assert!(last.contains("rel=\"prev\" href=\"/docs/b/\""), "{last}");
+}
+
+// ---- correctness sweep -------------------------------------------------
+
+#[test]
+fn a_section_and_the_home_page_can_pick_their_template() {
+    let root = fixture("template-override");
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/list.html"),
+        "{% extends \"base.html\" %}{% block content %}<p id=\"list\">{{ page.title }}:{{ pages | length }}</p>{% endblock %}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\ntemplate = \"list.html\"\n+++\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/_index.md"),
+        "+++\ntitle = \"Home\"\ntemplate = \"list.html\"\n+++\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let blog = text(&root.join("dist/blog/index.html"));
+    assert!(blog.contains("<p id=\"list\">Blog:1</p>"), "{blog}");
+    let home = text(&root.join("dist/index.html"));
+    assert!(home.contains("<p id=\"list\">Home:2</p>"), "{home}");
+}
+
+#[test]
+fn a_missing_section_template_fails_the_build_and_the_check() {
+    let root = fixture("template-missing");
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\ntemplate = \"nope.html\"\n+++\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .map(|_| ())
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("template nope.html not found"), "{err}");
+
+    let report = agno::check::check(&root, false).unwrap();
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("template nope.html does not exist")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn the_home_page_reads_its_frontmatter_dates() {
+    let root = fixture("home-dates");
+    fs::write(
+        root.join("content/_index.md"),
+        "+++\ntitle = \"Home\"\ndate = 2024-03-04\nupdated = 2024-03-05\n+++\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    // A list page renders no dates itself, but the sitemap wants the home
+    // page's `lastmod`, which needs the frontmatter to be parsed at all.
+    let sitemap = text(&root.join("dist/sitemap.xml"));
+    assert!(
+        sitemap.contains("<loc>https://example.com/</loc><lastmod>2024-03-05"),
+        "{sitemap}"
+    );
+}
+
+#[test]
+fn a_term_that_slugifies_to_an_existing_one_links_once() {
+    let root = fixture("term-dedupe");
+    fs::write(
+        root.join("content/blog/hello.md"),
+        "+++\ntitle = \"Hello\"\ndate = 2024-05-01\ntags = [\"Rust\", \"rust\", \"!!!\"]\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let post = text(&root.join("dist/blog/hello/index.html"));
+    assert_eq!(
+        post.matches("href=\"/tags/rust/\"").count(),
+        1,
+        "duplicate tag links: {post}"
+    );
+    assert!(!post.contains("/tags//"), "{post}");
+}
+
+#[test]
+fn a_nonexistent_site_root_is_an_error() {
+    let root = std::env::temp_dir().join(format!("agno-missing-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("does not exist"), "{err}");
+    assert!(!root.exists(), "the build created the missing root");
+}
+
+#[test]
+fn check_accepts_the_top_fragment() {
+    let root = fixture("check-top");
+    fs::write(
+        root.join("content/blog/hello.md"),
+        "+++\ntitle = \"Hello\"\ndate = 2024-05-01\n+++\n\n[up](#top) and [bad](#nope)\n",
+    )
+    .unwrap();
+    let report = agno::check::check(&root, false).unwrap();
+
+    assert!(
+        !report.errors.iter().any(|error| error.contains("#top")),
+        "{:?}",
+        report.errors
+    );
+    assert!(
+        report.errors.iter().any(|error| error.contains("#nope")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn feed_urls_percent_encode_spaces() {
+    let root = fixture("feed-encoding");
+    fs::write(
+        root.join("content/about.md"),
+        "+++\ntitle = \"About\"\ndate = 2024-01-01\nurl = \"/my page/\"\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let sitemap = text(&root.join("dist/sitemap.xml"));
+    assert!(sitemap.contains("/my%20page/"), "{sitemap}");
+    let rss = text(&root.join("dist/rss.xml"));
+    assert!(
+        rss.contains("<link>https://example.com/my%20page/</link>"),
+        "{rss}"
+    );
+}
+
+#[test]
+fn switching_the_output_dir_back_removes_stale_files() {
+    let root = fixture("output-switch");
+    build_incremental(&root);
+
+    fs::write(
+        root.join("agno.toml"),
+        "title = \"Test Site\"\nbase_url = \"https://example.com\"\noutput_dir = \"public\"\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    fs::remove_file(root.join("content/blog/hello.md")).unwrap();
+    build_incremental(&root);
+
+    fs::write(
+        root.join("agno.toml"),
+        "title = \"Test Site\"\nbase_url = \"https://example.com\"\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    assert!(
+        !root.join("dist/blog/hello/index.html").exists(),
+        "the deleted page survived in dist"
+    );
+}
+
+#[test]
+fn frontmatter_that_is_not_a_mapping_is_rejected() {
+    let root = fixture("frontmatter-mapping");
+    fs::write(
+        root.join("content/about.md"),
+        "---\nSome text\n---\n\nBody.\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .map(|_| ())
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("must be a mapping"), "{err}");
+    assert!(err.contains("about.md"), "{err}");
+}
+
+#[test]
+fn an_empty_frontmatter_block_is_not_rendered_as_content() {
+    let root = fixture("frontmatter-empty");
+    fs::write(root.join("content/about.md"), "---\n---\n\nJust body.\n").unwrap();
+    build_incremental(&root);
+
+    let about = text(&root.join("dist/about/index.html"));
+    assert!(about.contains("Just body."), "{about}");
+    assert!(
+        !about.contains("<hr"),
+        "the frontmatter rules leaked: {about}"
+    );
+}
+
+#[test]
+fn a_long_frontmatter_summary_survives_a_rebuild() {
+    let root = fixture("long-summary");
+    let summary = "ş".repeat(70_000);
+    fs::write(
+        root.join("content/about.md"),
+        format!(
+            "+++\ntitle = \"About\"\ndate = 2024-01-01\nsummary = \"{summary}\"\n+++\n\nBody.\n"
+        ),
+    )
+    .unwrap();
+    build_incremental(&root);
+    let first = text(&root.join("dist/index.html"));
+
+    build_incremental(&root);
+    let second = text(&root.join("dist/index.html"));
+    assert_eq!(first, second, "the cached summary was truncated");
+    assert!(second.contains(&summary), "the full summary is missing");
 }

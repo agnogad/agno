@@ -126,7 +126,7 @@ fn parse_tag(input: &str, index: usize) -> Option<(Tag<'_>, usize)> {
     if !(first.is_ascii_alphabetic() || first == '/' || first == '!') {
         return None;
     }
-    let end = input[index..].find('>').map(|offset| index + offset + 1)?;
+    let end = tag_end(input, index)?;
     let mut body = &input[index + 1..end - 1];
     body = body.trim_start_matches('/');
     let name_end = body
@@ -138,6 +138,35 @@ fn parse_tag(input: &str, index: usize) -> Option<(Tag<'_>, usize)> {
         },
         end,
     ))
+}
+
+/// Offset just past the `>` that closes the tag starting at `index`, ignoring
+/// `>` characters inside quoted attribute values.
+///
+/// `title="a > b"` is a valid attribute, and ending the tag at the first `>`
+/// would hand the rest of the value to the whitespace collapser, which then ate
+/// the space after it.
+fn tag_end(input: &str, index: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut cursor = index + 1;
+    let mut quote: Option<u8> = None;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        match quote {
+            Some(open) => {
+                if byte == open {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'>' => return Some(cursor + 1),
+                _ => {}
+            },
+        }
+        cursor += 1;
+    }
+    None
 }
 
 /// If a comment starts at `index`, return the offset just past it.
@@ -238,5 +267,39 @@ mod tests {
     fn keeps_a_stray_less_than_sign_as_text() {
         let input = "<p>a < b</p>";
         assert_eq!(minify_html(input), "<p>a < b</p>");
+    }
+
+    #[test]
+    fn does_not_collapse_whitespace_inside_quoted_attributes() {
+        let input = "<div title=\"a > b\">x</div><img alt='c > d'>";
+        assert_eq!(minify_html(input), input);
+        assert_eq!(
+            minify_html("<p>\n  <a href=\"/a\" title=\"q > r\">link</a>\n</p>"),
+            "<p><a href=\"/a\" title=\"q > r\">link</a></p>"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_quote_leaves_the_tag_as_text() {
+        // No closing quote, so there is no reliable tag end: emit the source.
+        let input = "<div title=\"oops>text";
+        assert_eq!(minify_html(input), input);
+    }
+
+    #[test]
+    fn minifying_twice_is_minifying_once() {
+        for input in [
+            "<p>\n  a  <b>b</b>\n</p>",
+            "<div title=\"a > b\">\n x \n</div>",
+            "<pre>\n  keep\n</pre>",
+            "<!-- c --><p>x</p>",
+            "<ul>\n <li>a</li>\n <li>b</li>\n</ul>",
+            "<span>a</span> <span>b</span>",
+            "<p>Şık   ve  hızlı</p>",
+            "<a href=\"/x\" title='q > r'>link</a>",
+        ] {
+            let once = minify_html(input);
+            assert_eq!(minify_html(&once), once, "{input:?}");
+        }
     }
 }

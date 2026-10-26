@@ -19,8 +19,11 @@ impl Templates {
         env.add_filter("starts_with", |value: String, prefix: String| {
             value.starts_with(&prefix)
         });
-        env.add_filter("url", |value: String| {
-            Value::from_safe_string(escape_url(&value))
+        env.add_filter("url", |value: Value| {
+            // Taking a `Value` rather than a `String` keeps an undefined
+            // variable rendering as an empty attribute, the way `safe` does,
+            // instead of failing the whole page.
+            Value::from_safe_string(escape_url(&value.to_string()))
         });
         for (name, source) in theme::TEMPLATES {
             if !dir.join(name).is_file() {

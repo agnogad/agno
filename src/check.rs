@@ -80,6 +80,26 @@ pub fn check(root: &Path, drafts: bool) -> Result<Report> {
         }
     }
 
+    // The home page and section indexes take `template` too, so a typo there
+    // would otherwise be a silent fallback to the default layout.
+    let mut overrides: Vec<(&Path, &str)> = Vec::new();
+    if let Some(template) = content.home.template.as_deref() {
+        overrides.push((&content.home.source, template));
+    }
+    for section in &content.sections {
+        if let Some(template) = section.template.as_deref() {
+            overrides.push((&section.source, template));
+        }
+    }
+    for (source, template) in overrides {
+        if !templates.has(template) {
+            report.errors.push(format!(
+                "{}: template {template} does not exist",
+                source.display()
+            ));
+        }
+    }
+
     // Anchors are validated after the first pass: they need the heading ids of
     // the page they point at, and those pages are only rendered on demand.
     let mut anchors: Vec<(String, &Path, usize, String)> = Vec::new();
@@ -122,6 +142,11 @@ pub fn check(root: &Path, drafts: bool) -> Result<Report> {
             }
         }
         for (key, source, line, anchor) in anchors {
+            // `#top` is the one fragment browsers resolve without an element:
+            // it scrolls to the start of the document, so it is never broken.
+            if anchor.eq_ignore_ascii_case("top") {
+                continue;
+            }
             // A link into a non-Markdown output (an image, a stylesheet) has no
             // heading set to check against.
             let Some(set) = ids.get(&key) else {
