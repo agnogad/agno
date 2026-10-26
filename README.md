@@ -36,11 +36,11 @@ marketing pages.
 ## Why agno?
 
 - **Fast by default.** Cold builds are parallel from Markdown parsing to output
-  writes: 1,000 plain posts build in 65 ms, and 10,000 posts with code blocks
-  in about one second on the [benchmark machine](#benchmarks).
+  writes: 1,000 plain posts build in about 106 ms, and 10,000 posts with code
+  blocks in about 1.3 seconds on the [benchmark machine](#benchmarks).
 - **Incremental by default.** A build remembers what it rendered, so a rebuild
   only touches the pages whose source, templates or site context changed:
-  1,000 posts rebuild in ~23 ms, and at 10,000 posts a rebuild costs about a
+  1,000 posts rebuild in ~33 ms, and at 10,000 posts a rebuild costs about a
   twelfth of a full build.
 - **One static binary.** The release binary is 4.2 MB and has no runtime
   dependencies. No `node_modules`, no language runtime, no service to install.
@@ -54,9 +54,10 @@ marketing pages.
   a working site from `agno new` in seconds.
 
 Benchmarked against Hugo, Zola, and Astro on the same corpus, agno builds
-**3.9–12.8× faster than Hugo**, **2.3–5.7× faster than Zola**, and
-**16.7–185× faster than Astro** on cold builds, and 17–48× faster than Zola on
-rebuilds. See [Benchmarks](#benchmarks) for numbers, methodology, and caveats.
+**3.3–9.3× faster than Hugo**, **1.9–14× faster than Zola** (2–6× from 1,000
+posts up), and **12–161× faster than Astro** on cold builds, and 13–16× faster
+than Zola on rebuilds. See [Benchmarks](#benchmarks) for numbers, methodology,
+and caveats.
 
 ## Installation
 
@@ -328,38 +329,44 @@ The output directory is removed before every timed run and process startup is
 included. `code` adds one syntax-highlighted code block per post; `heavy` adds
 three code blocks, a table, and a footnote.
 
-| Scenario | agno | Hugo | Astro |
-| --- | ---: | ---: | ---: |
-| 100 posts, plain | **12.9 ms** | 97.8 ms | 2,385 ms |
-| 1,000 posts, plain | **65.3 ms** | 320.9 ms | 3,596 ms |
-| 1,000 posts, code | **92.1 ms** | 396.3 ms | 3,530 ms |
-| 1,000 posts, heavy | **181.4 ms** | 2,071.3 ms | 5,715 ms |
-| 3,000 posts, heavy | **554.7 ms** | 7,120.9 ms | 9,273 ms |
-| 10,000 posts, code | **1,004 ms** | 4,067 ms | — |
+| Scenario | agno | Hugo | Zola | Astro |
+| --- | ---: | ---: | ---: | ---: |
+| 100 posts, plain | **22.9 ms** | 212.2 ms | 191.7 ms | 3,685 ms |
+| 1,000 posts, plain | **106.4 ms** | 501.3 ms | 250.7 ms | 5,546 ms |
+| 1,000 posts, code | **136.0 ms** | 516.3 ms | 437.8 ms | 4,787 ms |
+| 1,000 posts, heavy | **207.7 ms** | 1,892.6 ms | 1,080.0 ms | 5,407 ms |
+| 3,000 posts, heavy | **636.9 ms** | 5,757.0 ms | 2,248.4 ms | 7,425 ms |
+| 10,000 posts, code | **1,308 ms** | 4,006 ms | 3,236 ms | — |
 
-| Other situations | agno | Hugo | Astro |
-| --- | ---: | ---: | ---: |
-| Single-edit rebuild, 1,000 posts | **180 ms** | 545 ms | 3,724 ms |
-| 2-page site, cold build | **17 ms** | 95 ms | 2,825 ms |
-| CLI startup | **1.8 ms** | 58.1 ms | 133.2 ms |
-| Peak RSS, 1,000 posts/code | **21 MB** | 146 MB | 624 MB |
-| Peak RSS, 3,000 posts/heavy | **49 MB** | 540 MB | 701 MB |
-| Install footprint | **3.9 MB binary** | 62.6 MB binary | 121 MB `node_modules` |
+| Other situations | agno | Hugo | Zola | Astro |
+| --- | ---: | ---: | ---: | ---: |
+| Single-edit rebuild, 1,000 posts | **32.8 ms** | 691.4 ms | 485.7 ms | — |
+| 2-page site, cold build | **12.1 ms** | 102.5 ms | 113.5 ms | 2,497 ms |
+| CLI startup | **1.9 ms** | 79.1 ms | 13.4 ms | 114.7 ms |
+| Peak RSS, 1,000 posts/code | **21.7 MB** | 168.1 MB | 76.3 MB | 613.2 MB |
+| Peak RSS, 3,000 posts/heavy | **51.2 MB** | 558.8 MB | 170.7 MB | 688.3 MB |
+| Install footprint | **4.3 MB binary** | 95.1 MB binary | 50.8 MB binary | 121 MB `node_modules` |
 
-At 10,000 posts agno sustains about **9,955 pages/s**, compared with 2,459
-pages/s for Hugo. The full matrix, raw samples, and reproduction steps are in
-[`bench/REPORT.md`](bench/REPORT.md) and [`bench/README.md`](bench/README.md).
+At 10,000 posts agno sustains about **7,642 pages/s**, compared with 2,496
+pages/s for Hugo and 3,090 for Zola. The full matrix, raw samples, and
+reproduction steps are in [`bench/REPORT.md`](bench/REPORT.md) and
+[`bench/README.md`](bench/README.md).
 
-> **Report versions:** agno 0.1.0, Hugo 0.168.0, Astro 7.4.2. The current
-> release is 0.3.2; rerun [`bench/suite.py`](bench/suite.py) to measure your own
-> machine.
+Astro is missing from the rebuild row on purpose: its rebuild empties the output
+directory before rendering, and that deletion dominates the run on this
+filesystem (36 s against a 4.8 s cold build at 1,000 posts), so the number would
+measure the disk instead of the generator.
+
+> **Report versions:** agno 0.3.2, Hugo 0.168.0, Zola 0.23.6, Astro 7.4.2.
+> Rerun [`bench/suite.py`](bench/suite.py) to measure your own machine.
 
 ### Zola
 
-Zola is the closest Rust neighbour, so it gets its own run on the same corpus
-with equivalent templates, tag pages, a feed, a sitemap and syntax
-highlighting. Medians of 7 interleaved runs on the machine above, agno 0.3.2 +
-this branch against Zola 0.23.6:
+Zola is the closest Rust neighbour, so it also gets a head-to-head run: the
+same corpus built twice, with equivalent templates, tag pages, a feed, a
+sitemap and syntax highlighting, and the two generators alternating inside every
+scenario so a load spike hits both. Medians of 7 runs on the machine above,
+agno 0.3.2 + this branch against Zola 0.23.6:
 
 | Posts | Profile | Cold build | | Rebuild | |
 | ---: | --- | ---: | --- | ---: | --- |
@@ -529,7 +536,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The benchmark matrix compares agno with Hugo and Astro:
+The benchmark matrix compares agno with Hugo, Astro and Zola:
 
 ```sh
 python3 bench/suite.py

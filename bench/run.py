@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Benchmark agno against Hugo and Astro on the same Markdown corpus.
+"""Benchmark agno against Hugo, Astro and Zola on the same Markdown corpus.
 
 Usage:
     python3 bench/run.py --count 1000 --runs 5
     python3 bench/run.py --count 1000 --profile plain
 
-Set AGNO_BIN / HUGO_BIN to override binary paths. Astro deps are installed on
-first run with `npm install` (needs network).
+Set AGNO_BIN / HUGO_BIN / ZOLA_BIN to override binary paths. Astro deps are
+installed on first run with `npm install` (needs network).
 """
 import argparse
 import json
@@ -24,7 +24,31 @@ WORK = ROOT / "work"
 STYLE = REPO / "theme" / "style.css"
 AGNO = Path(os.environ.get("AGNO_BIN", REPO / "target/release/agno"))
 HUGO = Path(os.environ.get("HUGO_BIN") or shutil.which("hugo") or "hugo")
+ZOLA = Path(os.environ.get("ZOLA_BIN") or shutil.which("zola") or "/tmp/zola/zola")
 NPM = shutil.which("npm")
+
+# Zola scaffolds nothing, so the pages `agno new` creates are written here with
+# TOML frontmatter instead.
+HOME = """+++
+title = "My Agno Site"
++++
+
+Welcome. This site is built with **agno** — a small, fast static site generator.
+"""
+
+ABOUT = """+++
+title = "About"
+description = "About this site"
++++
+
+This is the about page. Edit `content/about.md` to change it.
+"""
+
+SECTION = """+++
+title = "Blog"
+sort_by = "date"
++++
+"""
 
 
 def run(cmd, cwd=None):
@@ -53,10 +77,41 @@ def generate(content_dir: Path, count: int, profile: str = "code"):
 
 def setup_agno(count: int, profile: str = "code") -> Path:
     site = WORK / "agno"
-    if not (site / "agno.toml").exists():
-        run([str(AGNO), "new", str(site)])
+    # Recreate the site every time, like the other fixtures: a site left over
+    # from an earlier, larger run would otherwise keep its stale sections and
+    # output, which makes the comparison unfair.
+    if site.exists():
+        shutil.rmtree(site)
+    run([str(AGNO), "new", str(site)])
     generate(site / "content", count, profile)
     return site
+
+
+def to_toml(src: str) -> str:
+    """Rewrite the generator's YAML frontmatter as Zola-compatible TOML."""
+    if not src.startswith("---\n"):
+        return src
+    end = src.index("\n---", 4)
+    front = src[4:end]
+    body = src[end + 4:]
+    keys = []
+    tags = []
+    for line in front.strip().splitlines():
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if key == "tags":
+            tags = [
+                item.strip().strip('"')
+                for item in value.strip("[]").split(",")
+                if item.strip()
+            ]
+        else:
+            keys.append(f"{key} = {value}")
+    out = "+++\n" + "\n".join(keys) + "\n"
+    if tags:
+        out += "\n[taxonomies]\ntags = [" + ", ".join(f'"{tag}"' for tag in tags) + "]\n"
+    return out + "+++\n" + body
 
 
 def setup_hugo(count: int, profile: str = "code") -> Path:
@@ -67,6 +122,24 @@ def setup_hugo(count: int, profile: str = "code") -> Path:
     (site / "static").mkdir(exist_ok=True)
     shutil.copy(STYLE, site / "static" / "style.css")
     generate(site / "content", count, profile)
+    return site
+
+
+def setup_zola(count: int, profile: str = "code") -> Path:
+    site = WORK / "zola"
+    if site.exists():
+        shutil.rmtree(site)
+    shutil.copytree(ROOT / "zola", site)
+    (site / "static").mkdir(exist_ok=True)
+    shutil.copy(STYLE, site / "static" / "style.css")
+    (site / "content").mkdir(exist_ok=True)
+    (site / "content/_index.md").write_text(HOME, encoding="utf-8")
+    (site / "content/about.md").write_text(ABOUT, encoding="utf-8")
+    generate(site / "content", count, profile)
+    (site / "content/blog/_index.md").write_text(SECTION, encoding="utf-8")
+    for post in sorted((site / "content/blog").glob("post-*.md")):
+        text = post.read_text(encoding="utf-8")
+        post.write_text(to_toml(text), encoding="utf-8")
     return site
 
 
@@ -110,11 +183,18 @@ def command(name: str, site: Path):
         ]
     if name == "astro":
         return [NPM, "run", "build", "--silent"]
+    if name == "zola":
+        return [str(ZOLA), "build"]
     raise ValueError(name)
 
 
+def cwd_for(name: str, site: Path):
+    """Directories the generator must be run from, if it has no --root flag."""
+    return site if name in ("astro", "zola") else None
+
+
 def dist(name: str, site: Path) -> Path:
-    return site / "dist"
+    return site / ("public" if name == "zola" else "dist")
 
 
 def content_dir(name: str, site: Path) -> Path:
@@ -125,7 +205,7 @@ def content_dir(name: str, site: Path) -> Path:
 
 def measure(name: str, site: Path, runs: int):
     cmd = command(name, site)
-    cwd = site if name == "astro" else None
+    cwd = cwd_for(name, site)
     shutil.rmtree(dist(name, site), ignore_errors=True)
     run(cmd, cwd=cwd)  # warmup
     times = []
@@ -160,7 +240,7 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=1000)
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--profile", default="code", choices=["plain", "code", "heavy"])
-    parser.add_argument("--only", choices=["agno", "hugo", "astro"])
+    parser.add_argument("--only", choices=["agno", "hugo", "astro", "zola"])
     args = parser.parse_args()
 
     WORK.mkdir(exist_ok=True)
@@ -177,6 +257,10 @@ def main() -> None:
         if not NPM:
             sys.exit("missing npm")
         sites["astro"] = setup_astro(args.count, args.profile)
+    if args.only in (None, "zola"):
+        if not ZOLA.exists():
+            sys.exit(f"missing zola binary ({ZOLA}); set ZOLA_BIN")
+        sites["zola"] = setup_zola(args.count, args.profile)
 
     results = [measure(name, site, args.runs) for name, site in sites.items()]
     for row in results:

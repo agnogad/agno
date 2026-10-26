@@ -20,32 +20,11 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-REPO = ROOT.parent
-WORK = ROOT / "work" / "zola-compare"
-STYLE = REPO / "theme" / "style.css"
-AGNO = Path(os.environ.get("AGNO_BIN", REPO / "target/release/agno"))
-ZOLA = Path(os.environ.get("ZOLA_BIN", shutil.which("zola") or "/tmp/zola/zola"))
+sys.path.insert(0, str(ROOT))
+import run as base  # noqa: E402
 
-HOME = """+++
-title = "My Agno Site"
-+++
-
-Welcome. This site is built with **agno** — a small, fast static site generator.
-"""
-
-ABOUT = """+++
-title = "About"
-description = "About this site"
-+++
-
-This is the about page. Edit `content/about.md` to change it.
-"""
-
-SECTION = """+++
-title = "Blog"
-sort_by = "date"
-+++
-"""
+AGNO = base.AGNO
+ZOLA = base.ZOLA
 
 
 def run(cmd, cwd=None):
@@ -57,70 +36,8 @@ def run(cmd, cwd=None):
         )
 
 
-def to_toml(src: str) -> str:
-    """Rewrite the generator's YAML frontmatter as Zola-compatible TOML."""
-    if not src.startswith("---\n"):
-        return src
-    end = src.index("\n---", 4)
-    front = src[4:end]
-    body = src[end + 4:]
-    keys = []
-    tags = []
-    for line in front.strip().splitlines():
-        key, _, value = line.partition(":")
-        key = key.strip()
-        value = value.strip()
-        if key == "tags":
-            tags = [item.strip().strip('"') for item in value.strip("[]").split(",") if item.strip()]
-        else:
-            keys.append(f"{key} = {value}")
-    out = "+++\n" + "\n".join(keys) + "\n"
-    if tags:
-        out += "\n[taxonomies]\ntags = [" + ", ".join(f'"{tag}"' for tag in tags) + "]\n"
-    return out + "+++\n" + body
-
-
 def setup(count: int, profile: str):
-    if WORK.exists():
-        shutil.rmtree(WORK)
-    WORK.mkdir(parents=True)
-
-    agno_site = WORK / "agno"
-    run([str(AGNO), "new", str(agno_site)])
-    run(
-        [
-            sys.executable,
-            str(ROOT / "gen.py"),
-            str(agno_site / "content"),
-            str(count),
-            "--profile",
-            profile,
-        ]
-    )
-
-    zola_site = WORK / "zola"
-    shutil.copytree(ROOT / "zola", zola_site)
-    (zola_site / "static").mkdir()
-    shutil.copy(STYLE, zola_site / "static" / "style.css")
-    (zola_site / "content").mkdir(exist_ok=True)
-    (zola_site / "content/_index.md").write_text(HOME, encoding="utf-8")
-    (zola_site / "content/about.md").write_text(ABOUT, encoding="utf-8")
-    (zola_site / "content/blog").mkdir()
-    (zola_site / "content/blog/_index.md").write_text(SECTION, encoding="utf-8")
-    for post in sorted((agno_site / "content/blog").glob("*.md")):
-        text = post.read_text(encoding="utf-8")
-        (zola_site / "content/blog" / post.name).write_text(to_toml(text), encoding="utf-8")
-    return agno_site, zola_site
-
-
-def command(name: str, site: Path):
-    if name == "agno":
-        return [str(AGNO), "build", "--root", str(site)]
-    return [str(ZOLA), "build"]
-
-
-def output(name: str, site: Path) -> Path:
-    return site / ("dist" if name == "agno" else "public")
+    return base.setup_agno(count, profile), base.setup_zola(count, profile)
 
 
 def time_one(cmd, cwd, out_dir: Path, clean: bool):
@@ -175,8 +92,8 @@ def main() -> None:
     zola_original = zola_post.read_text(encoding="utf-8")
 
     sites = {
-        "agno": (command("agno", agno_site), None, output("agno", agno_site)),
-        "zola": (command("zola", zola_site), zola_site, output("zola", zola_site)),
+        "agno": (base.command("agno", agno_site), None, base.dist("agno", agno_site)),
+        "zola": (base.command("zola", zola_site), zola_site, base.dist("zola", zola_site)),
     }
     for cmd, cwd, target in sites.values():
         shutil.rmtree(target, ignore_errors=True)
