@@ -1,0 +1,48 @@
+# cargo-deny: `cargo deny check` in .github/workflows/audit.yml.
+#
+# Kept deliberately short. A long allow list nobody reads is a rubber stamp,
+# so every entry that is not plain "this licence is fine" carries a reason.
+
+[advisories]
+# Three transitive crates are flagged unmaintained. None of them carries a
+# vulnerability, and none can be dropped without losing a feature:
+#
+#   bincode, yaml-rust          <- syntect, to read .sublime-syntax and the
+#                                  prebuilt syntax dumps. syntect has no
+#                                  release on a maintained parser yet.
+#   unsafe-libyaml              <- serde_yaml_ng, which is the frontmatter
+#                                  parser. See the note in Cargo.toml.
+#
+# Re-check these when syntect or serde_yaml_ng is bumped: an ignore that
+# outlives its reason is how a project ends up shipping a real advisory.
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 via syntect's syntax dumps; syntect has not moved off it" },
+    { id = "RUSTSEC-2024-0320", reason = "yaml-rust 0.4.5 via syntect; no upstream release on yaml-rust2 yet" },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml via serde_yaml_ng's frontmatter parser; no maintained replacement wired in yet" },
+]
+
+[licenses]
+# The full set actually present in the graph. Everything here is permissive
+# and OSI-approved except CC0-1.0 and Unlicense, which are public-domain
+# dedications - both strictly more permissive than MIT.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+]
+# Refuse anything the scanner only guessed at from stray licence text.
+confidence-threshold = 0.9
+
+[sources]
+# crates.io only. A dependency that starts resolving from a git URL or a
+# private registry is a supply-chain change, not a version bump, and should
+# have to be argued for in a diff.
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -15,19 +15,20 @@ permissions:
   contents: read
 
 jobs:
-  cargo-audit:
-    name: cargo audit
+  deny:
+    name: cargo deny
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit
+          tool: cargo-deny
 
-      # `cargo audit` fails on a vulnerability and only warns on an
-      # unmaintained crate, which is the split that matters here: agno pulls
-      # three unmaintained crates through syntect and serde_yaml_ng, and none
-      # of them has a CVE against it.
-      - run: cargo audit
+      # One pass over advisories, licences, sources and bans. This replaced
+      # `cargo audit`, which only failed on a vulnerability and merely warned
+      # about an unmaintained crate - and agno inherits three of those from
+      # syntect and serde_yaml_ng. deny.toml names each one with its reason,
+      # so a fourth would fail the build instead of scrolling past in a log.
+      - run: cargo deny check
