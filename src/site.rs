@@ -1,7 +1,7 @@
 use crate::cache;
 use crate::config::{Config, MenuItem};
-use crate::content::{self, Content, Listing, Page};
-use crate::markdown::{self, TocEntry, escape_html, push_escaped};
+use crate::content::{self, Content, Drafts, Listing, Page, SortBy};
+use crate::markdown::{self, TocEntry, escape_html};
 use crate::render::Templates;
 use crate::theme;
 use anyhow::{Context, Result, bail};
@@ -16,25 +16,33 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use walkdir::WalkDir;
 
+/// Options for a build. `Default` is an incremental build with no drafts.
+#[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
+    /// Include pages marked `draft = true`.
     pub drafts: bool,
+    /// Delete the output directory before building.
     pub clean: bool,
     /// Minify HTML output (the config file can also turn this on).
     pub minify: bool,
 }
 
+/// What a build did, and how long each phase took.
 #[derive(Debug)]
 pub struct Stats {
     pub pages: usize,
-    pub ms_total: u128,
-    pub ms_load: u128,
-    pub ms_pages: u128,
-    pub ms_rest: u128,
+    pub total: Duration,
+    /// Loading content and frontmatter.
+    pub load: Duration,
+    /// Rendering pages.
+    pub render: Duration,
+    /// Lists, feeds, static files and the manifest.
+    pub rest: Duration,
     pub output: PathBuf,
 }
 
@@ -89,6 +97,16 @@ struct PageView<'a> {
     extra: &'a Json,
     toc: &'a [TocEntry],
     toc_html: &'a str,
+    /// Previous and next page in the section's own order; `None` at the ends.
+    prev: Option<NeighborView<'a>>,
+    next: Option<NeighborView<'a>>,
+}
+
+#[derive(Serialize, Clone)]
+struct NeighborView<'a> {
+    title: &'a str,
+    url: &'a str,
+    date_display: &'a str,
 }
 
 #[derive(Serialize, Clone)]
@@ -150,6 +168,8 @@ struct ListSpec<'a> {
     pages: Vec<&'a Page>,
     paginator: Option<PagerView>,
     terms: Vec<TermView<'a>>,
+    /// `template` from the section's or home page's `_index.md`.
+    template: Option<&'a str>,
     candidates: &'static [&'static str],
 }
 
@@ -183,20 +203,36 @@ fn page_url(section_url: &str, number: usize) -> String {
 
 struct PageIndex<'a> {
     sections: HashMap<&'a str, Vec<&'a Page>>,
+    /// Previous and next page of each page, in its section's own order.
+    links: HashMap<&'a str, (Option<&'a Page>, Option<&'a Page>)>,
     tags: HashMap<String, Vec<&'a Page>>,
     categories: HashMap<String, Vec<&'a Page>>,
 }
 
 impl<'a> PageIndex<'a> {
-    fn new(pages: &'a [Page]) -> Self {
-        let mut sections: HashMap<&str, Vec<&Page>> = HashMap::new();
+    fn new(pages: &'a [Page], sections: &'a [Listing]) -> Self {
+        let mut grouped: HashMap<&str, Vec<&Page>> = HashMap::new();
         for page in pages {
             if let Some(section) = page.section.as_deref() {
-                sections.entry(section).or_default().push(page);
+                grouped.entry(section).or_default().push(page);
+            }
+        }
+        let order: HashMap<&str, SortBy> = sections
+            .iter()
+            .map(|section| (section.key.as_str(), section.sort_by))
+            .collect();
+        let mut links: HashMap<&str, (Option<&Page>, Option<&Page>)> = HashMap::new();
+        for (key, group) in &mut grouped {
+            sort_pages(group, order.get(*key).copied().unwrap_or_default());
+            for (position, page) in group.iter().enumerate() {
+                let prev = position.checked_sub(1).map(|i| group[i]);
+                let next = group.get(position + 1).copied();
+                links.insert(page.url.as_str(), (prev, next));
             }
         }
         Self {
-            sections,
+            sections: grouped,
+            links,
             tags: term_index(pages, |page| &page.tags),
             categories: term_index(pages, |page| &page.categories),
         }
@@ -204,6 +240,11 @@ impl<'a> PageIndex<'a> {
 
     fn section(&self, key: &str) -> &[&'a Page] {
         self.sections.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The page before and after `url` in its section, if any.
+    fn links(&self, url: &str) -> (Option<&'a Page>, Option<&'a Page>) {
+        self.links.get(url).copied().unwrap_or((None, None))
     }
 
     fn tag(&self, key: &str) -> &[&'a Page] {
@@ -245,6 +286,27 @@ fn term_index(
     index
 }
 
+/// Order one section's pages. `date` leaves the global newest-first order
+/// alone; the other two re-sort, and a stable sort keeps the date order as the
+/// tie-breaker for equal weights. The URL is the last key so a section renders
+/// the same way on every machine.
+fn sort_pages(pages: &mut [&Page], sort_by: SortBy) {
+    match sort_by {
+        SortBy::Date => {}
+        SortBy::Weight => pages.sort_by_cached_key(|page| {
+            (
+                page.weight,
+                std::cmp::Reverse(page.date),
+                page.title.to_lowercase(),
+                page.url.clone(),
+            )
+        }),
+        SortBy::Title => {
+            pages.sort_by_cached_key(|page| (page.title.to_lowercase(), page.url.clone()))
+        }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Manifest {
     output: String,
@@ -253,6 +315,10 @@ struct Manifest {
 
 pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let started = Instant::now();
+    // Anything in the output directory written at or after this instant came
+    // from this build, so a copy must not be skipped because it looks newer
+    // than its source.
+    let build_started = SystemTime::now();
     let mut cfg = Config::load(root)?;
     if opts.minify {
         cfg.minify = true;
@@ -263,8 +329,8 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     BUILD_GENERATION.fetch_add(1, Ordering::Relaxed);
 
     let phase = Instant::now();
-    let content = content::load(&cfg, opts.drafts)?;
-    let ms_load = phase.elapsed().as_millis();
+    let content = content::load(&cfg, Drafts::from(opts.drafts))?;
+    let load = phase.elapsed();
 
     let static_files = static_files(&cfg)?;
     let static_paths = static_rels(&cfg, &static_files)?;
@@ -275,7 +341,20 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let has_static_style = static_paths.iter().any(|path| path == "style.css");
 
     let templates = Templates::load(&cfg.templates())?;
-    let index = PageIndex::new(&content.pages);
+    let index = PageIndex::new(&content.pages, &content.sections);
+    // A page's neighbours are part of what it renders, so they join its cache
+    // key: adding or reordering a page re-renders the two pages around it.
+    let links: Vec<(Option<&Page>, Option<&Page>)> = content
+        .pages
+        .iter()
+        .map(|page| index.links(&page.url))
+        .collect();
+    let page_keys: Vec<u64> = content
+        .pages
+        .iter()
+        .zip(&links)
+        .map(|(page, (prev, next))| page_key(page, *prev, *next))
+        .collect();
     let site = site_view(&cfg, &content, &index);
     // Serialize the site once: it is identical for every page, and rebuilding
     // it per page used to cost O(pages x tags) on taxonomy-heavy sites.
@@ -294,7 +373,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let previous = if opts.clean {
         None
     } else {
-        read_manifest(root)
+        read_manifest(root, &output)
     };
     let mut expected = expected_outputs(&cfg, &content, &static_paths)?;
     if let Some(previous) = &previous {
@@ -310,7 +389,9 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let fresh: Vec<Option<String>> = content
         .pages
         .par_iter()
-        .map(|page| {
+        .zip(links.par_iter())
+        .zip(page_keys.par_iter())
+        .map(|((page, (prev, next)), key)| {
             render_page(
                 &cfg,
                 &templates,
@@ -319,10 +400,13 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
                 &default_name,
                 &default_page,
                 page,
+                *prev,
+                *next,
+                *key,
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    let ms_pages = phase.elapsed().as_millis();
+    let render = phase.elapsed();
 
     content
         .pages
@@ -336,10 +420,11 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         .pages
         .iter()
         .zip(&fresh)
-        .map(|(page, fresh)| {
+        .zip(&page_keys)
+        .map(|((page, fresh), key)| {
             let summary = fresh
                 .as_deref()
-                .or_else(|| fingerprints.summary(&page.url, page.content_key))
+                .or_else(|| fingerprints.summary(&page.url, *key))
                 .unwrap_or(&page.summary);
             (page.url.as_str(), summary)
         })
@@ -362,13 +447,16 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let phase = Instant::now();
     let list_names: Vec<String> = lists
         .iter()
-        .map(|list| {
-            templates.first(list.candidates).with_context(|| {
+        .map(|list| match list.template {
+            // An explicit `template` wins and is reported by `render_list` if
+            // it does not exist, the same way a page's override is.
+            Some(name) => Ok(name.to_string()),
+            None => templates.first(list.candidates).with_context(|| {
                 format!(
                     "no template found for {} among {:?}",
                     list.url, list.candidates
                 )
-            })
+            }),
         })
         .collect::<Result<Vec<_>>>()?;
     let list_keys: Vec<u64> = lists
@@ -406,8 +494,8 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         ),
     )?;
 
-    copy_static(&cfg, &static_files)?;
-    copy_assets(&cfg, &content.assets)?;
+    copy_static(&cfg, &static_files, build_started)?;
+    copy_assets(&cfg, &content.assets, build_started)?;
     if !has_static_style {
         write_text(&output, "style.css", theme::STYLE)?;
     }
@@ -420,13 +508,18 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         || list_rendered.iter().any(|rendered| *rendered)
         || fingerprints.len() != expected_entries
     {
-        let pages = content.pages.iter().zip(fresh.iter()).map(|(page, fresh)| {
-            let summary = fresh
-                .as_deref()
-                .or_else(|| fingerprints.summary(&page.url, page.content_key))
-                .unwrap_or(&page.summary);
-            (page.url.as_str(), page.content_key, summary)
-        });
+        let pages = content
+            .pages
+            .iter()
+            .zip(fresh.iter())
+            .zip(page_keys.iter())
+            .map(|((page, fresh), key)| {
+                let summary = fresh
+                    .as_deref()
+                    .or_else(|| fingerprints.summary(&page.url, *key))
+                    .unwrap_or(&page.summary);
+                (page.url.as_str(), *key, summary)
+            });
         let lists = lists
             .iter()
             .zip(&list_keys)
@@ -436,10 +529,10 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
 
     Ok(Stats {
         pages: content.pages.len(),
-        ms_total: started.elapsed().as_millis(),
-        ms_load,
-        ms_pages,
-        ms_rest: phase.elapsed().as_millis(),
+        total: started.elapsed(),
+        load,
+        render,
+        rest: phase.elapsed(),
         output,
     })
 }
@@ -498,15 +591,23 @@ pub(crate) fn expected_outputs(
     Ok(expected)
 }
 
+/// The page size a section actually splits at, or `None` when it does not
+/// split. One `Option` drives both the page count and the chunk size, so a
+/// zero can never reach `slice::chunks` (which panics on it).
+fn split_size(section: &Listing, count: usize) -> Option<usize> {
+    section
+        .paginate_by
+        .filter(|size| *size > 0 && count > *size)
+}
+
 fn section_page_count(section: &Listing, count: usize) -> usize {
-    match section.paginate_by {
-        Some(size) if size > 0 && count > size => count.div_ceil(size),
-        _ => 1,
-    }
+    split_size(section, count).map_or(1, |size| count.div_ceil(size))
 }
 
 fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<'a>> {
     let mut lists: Vec<ListSpec<'a>> = Vec::new();
+    let mut home_pages: Vec<&Page> = content.pages.iter().collect();
+    sort_pages(&mut home_pages, content.home_sort_by);
     lists.push(ListSpec {
         title: &content.home.title,
         url: "/".to_string(),
@@ -514,18 +615,17 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
         body: &content.home.body,
         content: Arc::new(OnceLock::new()),
         extra: content.home.extra.clone(),
-        pages: content.pages.iter().collect(),
+        pages: home_pages,
         paginator: None,
         terms: Vec::new(),
+        template: content.home.template.as_deref(),
         candidates: &["index.html"],
     });
     for section in &content.sections {
         let all = index.section(&section.key);
-        let page_size = section.paginate_by.unwrap_or(0);
-        let total = section_page_count(section, all.len());
         // One cell per section: every paginated page renders the same body.
         let content_cell = Arc::new(OnceLock::new());
-        if total <= 1 {
+        let Some(page_size) = split_size(section, all.len()) else {
             lists.push(ListSpec {
                 title: &section.title,
                 url: section.url.clone(),
@@ -536,10 +636,12 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                 pages: all.to_vec(),
                 paginator: None,
                 terms: Vec::new(),
+                template: section.template.as_deref(),
                 candidates: &["section.html"],
             });
             continue;
-        }
+        };
+        let total = all.len().div_ceil(page_size);
         let links: Vec<PagerLink> = (1..=total)
             .map(|number| PagerLink {
                 number,
@@ -574,6 +676,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                     links,
                 }),
                 terms: Vec::new(),
+                template: section.template.as_deref(),
                 candidates: &["section.html"],
             });
         }
@@ -598,6 +701,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                     count: index.terms(kind, &term.key).len(),
                 })
                 .collect(),
+            template: None,
             candidates: &["taxonomy.html"],
         });
     }
@@ -612,6 +716,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
             pages: index.tag(&tag.key).to_vec(),
             paginator: None,
             terms: Vec::new(),
+            template: None,
             candidates: &["tag.html", "section.html"],
         });
     }
@@ -626,6 +731,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
             pages: index.category(&category.key).to_vec(),
             paginator: None,
             terms: Vec::new(),
+            template: None,
             candidates: &["category.html", "tag.html", "section.html"],
         });
     }
@@ -639,6 +745,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
         pages: Vec::new(),
         paginator: None,
         terms: Vec::new(),
+        template: None,
         candidates: &["404.html"],
     });
     lists
@@ -678,13 +785,14 @@ fn render_page(
     default_name: &str,
     default_template: &Template<'_, '_>,
     page: &Page,
+    prev: Option<&Page>,
+    next: Option<&Page>,
+    key: u64,
 ) -> Result<Option<String>> {
     // The rendered file in `dist/` doubles as the cache: when the page source,
-    // the templates and the site-wide context are unchanged, skip Markdown,
-    // highlighting, templating and the write entirely.
-    if fingerprints.summary(&page.url, page.content_key).is_some()
-        && output_path(cfg, &page.url).is_file()
-    {
+    // the templates, the site-wide context and the page's neighbours are
+    // unchanged, skip Markdown, highlighting, templating and the write entirely.
+    if fingerprints.summary(&page.url, key).is_some() && output_path(cfg, &page.url).is_file() {
         return Ok(None);
     }
 
@@ -700,6 +808,8 @@ fn render_page(
         &summary,
         &rendered.toc,
         &rendered.toc_html,
+        prev,
+        next,
     );
     let cards: Vec<CardView> = Vec::new();
     let ctx = context! {
@@ -1019,50 +1129,63 @@ fn validate_urls(cfg: &Config, content: &Content, static_paths: &[String]) -> Re
     Ok(())
 }
 
-fn manifest_path(root: &Path) -> PathBuf {
-    root.join(".agno-cache").join("outputs.json")
+/// One manifest per output directory: switching `output_dir` and back must not
+/// lose the record of what the earlier build wrote, or the stale sweep below
+/// skips files that no longer have a source.
+fn manifest_path(root: &Path, output: &Path) -> PathBuf {
+    let tag = cache::fingerprint(0, output.to_string_lossy().as_bytes());
+    root.join(".agno-cache")
+        .join(format!("outputs-{tag:016x}.json"))
 }
 
 /// Everything a page render depends on except the page source itself.
+/// Bumped when a change alters rendered output without changing a template, a
+/// config value or the site context, so an existing cache does not keep pages
+/// from the previous renderer. 2: HTML escaping no longer escapes `/`.
+const RENDER_REVISION: u64 = 2;
+
 fn header_hash(cfg: &Config, site: &SiteView<'_>) -> Result<u64> {
     let site_json = serde_json::to_string(site).context("serializing site context")?;
     Ok(cache::combine(&[
         cache::fingerprint(0, env!("CARGO_PKG_VERSION").as_bytes()),
+        cache::fingerprint(0, &RENDER_REVISION.to_le_bytes()),
         cache::fingerprint(0, if cfg.highlight { b"on" } else { b"off" }),
         cache::fingerprint(0, if cfg.minify { b"min" } else { b"raw" }),
         cache::fingerprint(0, cfg.language.as_bytes()),
         cache::fingerprint(0, site_json.as_bytes()),
-        templates_fingerprint(&cfg.templates()),
+        templates_fingerprint(&cfg.templates())?,
     ]))
 }
 
-fn templates_fingerprint(dir: &Path) -> u64 {
+fn templates_fingerprint(dir: &Path) -> Result<u64> {
     let mut hash = cache::fingerprint(0, b"agno-templates");
     for (name, source) in theme::TEMPLATES {
         hash = cache::fingerprint(hash, name.as_bytes());
         hash = cache::fingerprint(hash, source.as_bytes());
     }
     if !dir.is_dir() {
-        return hash;
+        return Ok(hash);
     }
-    let mut files: Vec<PathBuf> = WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .collect();
+    // A template the walk cannot see would drop out of the header hash, and the
+    // cache would keep serving pages rendered from it.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(dir) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            files.push(entry.into_path());
+        }
+    }
     files.sort();
     for file in files {
         hash = cache::fingerprint(hash, file.to_string_lossy().as_bytes());
-        if let Ok(bytes) = fs::read(&file) {
-            hash = cache::fingerprint(hash, &bytes);
-        }
+        let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+        hash = cache::fingerprint(hash, &bytes);
     }
-    hash
+    Ok(hash)
 }
 
-fn read_manifest(root: &Path) -> Option<Manifest> {
-    let src = fs::read_to_string(manifest_path(root)).ok()?;
+fn read_manifest(root: &Path, output: &Path) -> Option<Manifest> {
+    let src = fs::read_to_string(manifest_path(root, output)).ok()?;
     serde_json::from_str(&src).ok()
 }
 
@@ -1080,7 +1203,7 @@ fn write_manifest(
     {
         return Ok(());
     }
-    let path = manifest_path(root);
+    let path = manifest_path(root, output);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
@@ -1198,6 +1321,8 @@ fn page_view<'a>(
     summary: &'a str,
     toc: &'a [TocEntry],
     toc_html: &'a str,
+    prev: Option<&'a Page>,
+    next: Option<&'a Page>,
 ) -> PageView<'a> {
     PageView {
         title: &page.title,
@@ -1222,7 +1347,39 @@ fn page_view<'a>(
         extra: &page.extra,
         toc,
         toc_html,
+        prev: neighbor(prev),
+        next: neighbor(next),
     }
+}
+
+fn neighbor(page: Option<&Page>) -> Option<NeighborView<'_>> {
+    page.map(|page| NeighborView {
+        title: &page.title,
+        url: &page.url,
+        date_display: &page.date_display,
+    })
+}
+
+/// Cache key of a rendered page: its source fingerprint plus every field the
+/// navigation exposes about the two pages it points at. A neighbour that is
+/// added, removed, renamed or re-dated therefore re-renders this page.
+fn page_key(page: &Page, prev: Option<&Page>, next: Option<&Page>) -> u64 {
+    let mut hash = page.content_key;
+    for neighbor in [prev, next] {
+        let (url, title, date_display) = neighbor
+            .map(|page| {
+                (
+                    page.url.as_str(),
+                    page.title.as_str(),
+                    page.date_display.as_str(),
+                )
+            })
+            .unwrap_or(("", "", ""));
+        hash = cache::fingerprint(hash, url.as_bytes());
+        hash = cache::fingerprint(hash, title.as_bytes());
+        hash = cache::fingerprint(hash, date_display.as_bytes());
+    }
+    hash
 }
 
 fn describe<'a>(page: &'a Page, summary: &'a str) -> &'a str {
@@ -1273,14 +1430,16 @@ fn rss(cfg: &Config, pages: &[Page], summaries: &HashMap<&str, &str>) -> String 
         .filter(|page| page.date.is_some())
         .take(cfg.rss_items)
     {
-        let link = cfg.absolute(&page.url);
+        let link = {
+            let mut escaped = String::with_capacity(page.url.len() + cfg.base_url.len() + 8);
+            push_url_escaped(&mut escaped, &cfg.absolute(&page.url));
+            escaped
+        };
         let pub_date = page.rss_date();
         let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
         items.push_str(&format!(
-            "<item><title>{}</title><link>{}</link><guid isPermaLink=\"true\">{}</guid>{}<description>{}</description></item>",
+            "<item><title>{}</title><link>{link}</link><guid isPermaLink=\"true\">{link}</guid>{}<description>{}</description></item>",
             escape_html(&page.title),
-            escape_html(&link),
-            escape_html(&link),
             if pub_date.is_empty() {
                 String::new()
             } else {
@@ -1320,7 +1479,15 @@ fn search_index(pages: &[Page], summaries: &HashMap<&str, &str>) -> Result<Strin
 fn sitemap(cfg: &Config, content: &Content) -> String {
     let count = content.pages.len() + content.sections.len() + content.tags.len() + 1;
     let mut urls = String::with_capacity(count * 96);
-    push_url(&mut urls, cfg, "/", content.home.date);
+    // Pages report their modification date when they have one; the home page
+    // used to report its publication date, which disagreed with every other
+    // entry in the same sitemap.
+    push_url(
+        &mut urls,
+        cfg,
+        "/",
+        content.home.updated.or(content.home.date),
+    );
     for page in &content.pages {
         push_url(&mut urls, cfg, &page.url, page.updated.or(page.date));
     }
@@ -1351,8 +1518,8 @@ fn sitemap(cfg: &Config, content: &Content) -> String {
 
 fn push_url(out: &mut String, cfg: &Config, url: &str, date: Option<OffsetDateTime>) {
     out.push_str("<url><loc>");
-    push_escaped(out, &cfg.base_url);
-    push_escaped(out, url);
+    push_url_escaped(out, &cfg.base_url);
+    push_url_escaped(out, url);
     out.push_str("</loc>");
     if let Some(lastmod) = date.and_then(|value| value.format(&Rfc3339).ok()) {
         out.push_str("<lastmod>");
@@ -1362,7 +1529,56 @@ fn push_url(out: &mut String, cfg: &Config, url: &str, date: Option<OffsetDateTi
     out.push_str("</url>");
 }
 
-pub fn remove_all(path: &Path) -> std::io::Result<()> {
+const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Append a URL to an XML document: percent-encode the characters a URI cannot
+/// carry literally, then XML-escape what is left.
+///
+/// A `url` frontmatter value may contain a space, and `<loc>https://host/my
+/// page/</loc>` is not a valid sitemap entry even though it is well-formed XML.
+fn push_url_escaped(out: &mut String, url: &str) {
+    for ch in url.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            ch if ch.is_ascii_control()
+                || matches!(ch, ' ' | '`' | '{' | '|' | '}' | '\\' | '^') =>
+            {
+                let mut buffer = [0u8; 4];
+                for byte in ch.encode_utf8(&mut buffer).bytes() {
+                    out.push('%');
+                    out.push(HEX[usize::from(byte >> 4)] as char);
+                    out.push(HEX[usize::from(byte & 0xf)] as char);
+                }
+            }
+            ch => out.push(ch),
+        }
+    }
+}
+
+/// Remove the build output and the fingerprint cache for the site at `root`,
+/// and return the output directory that was cleaned.
+///
+/// Both paths come from the validated config, so this cannot be aimed at an
+/// arbitrary directory. `agno clean` goes through here rather than deleting a
+/// path it computed itself.
+pub fn clean(root: &Path) -> Result<PathBuf> {
+    let cfg = Config::load(root)?;
+    cfg.validate()?;
+    let output = cfg.output();
+    let cache = root.join(".agno-cache");
+    for path in [&output, &cache] {
+        if path.exists() {
+            remove_all(path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+    Ok(output)
+}
+
+fn remove_all(path: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return fs::remove_file(path);
@@ -1370,18 +1586,28 @@ pub fn remove_all(path: &Path) -> std::io::Result<()> {
     // `DirEntry::file_type` is served from readdir's `d_type` on Linux, so this
     // avoids one `statx` per entry: a 10,000-page site has 10,000 of them and
     // they dominate deleting the output tree.
-    let entries: Vec<(PathBuf, bool)> = fs::read_dir(path)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| {
-            let is_dir = match entry.file_type() {
-                Ok(kind) => kind.is_dir(),
-                Err(_) => fs::symlink_metadata(entry.path())
-                    .map(|meta| meta.is_dir())
-                    .unwrap_or(false),
-            };
-            (entry.path(), is_dir)
-        })
-        .collect();
+    //
+    // An entry that cannot be read is remembered and reported at the end
+    // instead of being skipped: a clean that leaves files behind must not
+    // print a success message.
+    let mut entries: Vec<(PathBuf, bool)> = Vec::new();
+    let mut failed: Option<std::io::Error> = None;
+    for entry in fs::read_dir(path)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                failed.get_or_insert(err);
+                continue;
+            }
+        };
+        let is_dir = match entry.file_type() {
+            Ok(kind) => kind.is_dir(),
+            Err(_) => fs::symlink_metadata(entry.path())
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false),
+        };
+        entries.push((entry.path(), is_dir));
+    }
     entries.par_iter().try_for_each(|(entry, is_dir)| {
         if *is_dir {
             remove_all(entry)
@@ -1389,6 +1615,9 @@ pub fn remove_all(path: &Path) -> std::io::Result<()> {
             fs::remove_file(entry)
         }
     })?;
+    if let Some(err) = failed {
+        return Err(err);
+    }
     fs::remove_dir(path)
 }
 
@@ -1397,12 +1626,17 @@ fn static_files(cfg: &Config) -> Result<Vec<PathBuf>> {
     if !src.is_dir() {
         return Ok(Vec::new());
     }
-    Ok(WalkDir::new(&src)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .collect())
+    // A directory that cannot be read is an error, not an empty directory: the
+    // build would otherwise finish successfully with the assets missing from
+    // the output.
+    let mut files = Vec::new();
+    for entry in WalkDir::new(&src) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            files.push(entry.into_path());
+        }
+    }
+    Ok(files)
 }
 
 fn static_rels(cfg: &Config, files: &[PathBuf]) -> Result<Vec<String>> {
@@ -1419,7 +1653,7 @@ pub(crate) fn static_paths(cfg: &Config) -> Result<Vec<String>> {
     static_rels(cfg, &static_files(cfg)?)
 }
 
-fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
+fn copy_static(cfg: &Config, files: &[PathBuf], build_started: SystemTime) -> Result<()> {
     let src = cfg.static_dir();
     let dest = cfg.output();
     files.par_iter().try_for_each(|file| {
@@ -1428,8 +1662,10 @@ fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
         // `fs::copy` stamps the target with the current time, so a target that
         // is at least as new as its source with the same size is already a
         // faithful copy. Re-copying untouched assets was the bulk of a rebuild
-        // on sites with images or fonts.
-        if is_up_to_date(file, &target) {
+        // on sites with images or fonts. A target this build just wrote is not
+        // a copy of anything, though: `static/index.html` overrides a rendered
+        // page, and the two can easily be the same length.
+        if is_up_to_date(file, &target, build_started) {
             return Ok(());
         }
         if let Some(parent) = target.parent() {
@@ -1441,11 +1677,11 @@ fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn copy_assets(cfg: &Config, assets: &[content::Asset]) -> Result<()> {
+fn copy_assets(cfg: &Config, assets: &[content::Asset], build_started: SystemTime) -> Result<()> {
     let dest = cfg.output();
     assets.par_iter().try_for_each(|asset| {
         let target = dest.join(output_rel(&asset.url));
-        if is_up_to_date(&asset.source, &target) {
+        if is_up_to_date(&asset.source, &target, build_started) {
             return Ok(());
         }
         if let Some(parent) = target.parent() {
@@ -1457,7 +1693,11 @@ fn copy_assets(cfg: &Config, assets: &[content::Asset]) -> Result<()> {
     Ok(())
 }
 
-fn is_up_to_date(source: &Path, target: &Path) -> bool {
+/// True when `target` is a copy of `source` that does not need to be redone.
+/// `build_started` marks the point before which `target` must have been
+/// written for it to be a copy from an earlier build rather than this one's
+/// output.
+fn is_up_to_date(source: &Path, target: &Path, build_started: SystemTime) -> bool {
     let (Ok(src), Ok(dst)) = (fs::metadata(source), fs::metadata(target)) else {
         return false;
     };
@@ -1465,7 +1705,7 @@ fn is_up_to_date(source: &Path, target: &Path) -> bool {
         return false;
     }
     match (src.modified(), dst.modified()) {
-        (Ok(src), Ok(dst)) => dst >= src,
+        (Ok(src), Ok(dst)) => dst >= src && dst < build_started,
         _ => false,
     }
 }

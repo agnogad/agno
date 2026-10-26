@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8; 8] = b"AGNOFP01";
+const MAGIC: &[u8; 8] = b"AGNOFP02";
 
 /// Stable 64-bit FNV-1a. Deliberately not `DefaultHasher`: fingerprints must
 /// survive toolchain upgrades, otherwise every Rust update costs a full build.
@@ -35,9 +35,13 @@ pub fn combine(values: &[u64]) -> u64 {
     hash
 }
 
-pub struct Entry {
-    pub key: u64,
-    pub summary: String,
+/// One page's cached render fingerprint and summary.
+///
+/// Private: no public method hands an `Entry` out, so making the type public
+/// only promised an API the crate does not keep.
+struct Entry {
+    key: u64,
+    summary: String,
 }
 
 pub struct Fingerprints {
@@ -85,17 +89,18 @@ impl Fingerprints {
         let mut out = Vec::with_capacity(16 + items.len() * 64);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&self.header.to_le_bytes());
-        out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        out.extend_from_slice(&field_len(items.len(), "the page count")?.to_le_bytes());
         for (url, key, summary) in items {
             let url = url.as_bytes();
             let summary = summary.as_bytes();
-            let url_len = u16::try_from(url.len()).unwrap_or(u16::MAX);
-            let summary_len = u16::try_from(summary.len()).unwrap_or(u16::MAX);
-            out.extend_from_slice(&url_len.to_le_bytes());
-            out.extend_from_slice(&url[..usize::from(url_len)]);
+            // Lengths are u32 and never clamped: a frontmatter summary is
+            // arbitrary text, and truncating it here made a rebuild render a
+            // shorter summary than the build that filled the cache.
+            out.extend_from_slice(&field_len(url.len(), "a cached url")?.to_le_bytes());
+            out.extend_from_slice(url);
             out.extend_from_slice(&key.to_le_bytes());
-            out.extend_from_slice(&summary_len.to_le_bytes());
-            out.extend_from_slice(&summary[..usize::from(summary_len)]);
+            out.extend_from_slice(&field_len(summary.len(), "a cached summary")?.to_le_bytes());
+            out.extend_from_slice(summary);
         }
 
         let target = path(root);
@@ -106,6 +111,22 @@ impl Fingerprints {
         fs::write(&tmp, &out)?;
         fs::rename(&tmp, &target)
     }
+}
+
+/// A length that fits the on-disk `u32` field.
+///
+/// The previous version wrote `len as u32`, which wraps silently: a 4 GiB
+/// summary would be stored as a short one and the rebuild would render
+/// different output than the build that filled the cache. Refusing to write is
+/// the only honest option — the cache is an optimisation, so a too-large value
+/// can fall back to a full build.
+fn field_len(len: usize, what: &str) -> std::io::Result<u32> {
+    u32::try_from(len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{what} is {len} bytes, over the 4 GiB cache limit"),
+        )
+    })
 }
 
 fn path(root: &Path) -> PathBuf {
@@ -124,13 +145,14 @@ fn decode(bytes: &[u8], header: u64) -> Option<HashMap<String, Entry>> {
     let mut entries = HashMap::with_capacity(count.min(1 << 20));
     let mut cursor = 20usize;
     for _ in 0..count {
-        let url_len = read_u16(bytes, &mut cursor)?;
-        let url = std::str::from_utf8(bytes.get(cursor..cursor + url_len)?).ok()?;
+        let url_len = read_u32(bytes, &mut cursor)?;
+        let url = std::str::from_utf8(bytes.get(cursor..cursor.checked_add(url_len)?)?).ok()?;
         cursor += url_len;
         let key = u64::from_le_bytes(bytes.get(cursor..cursor + 8)?.try_into().ok()?);
         cursor += 8;
-        let summary_len = read_u16(bytes, &mut cursor)?;
-        let summary = std::str::from_utf8(bytes.get(cursor..cursor + summary_len)?).ok()?;
+        let summary_len = read_u32(bytes, &mut cursor)?;
+        let summary =
+            std::str::from_utf8(bytes.get(cursor..cursor.checked_add(summary_len)?)?).ok()?;
         cursor += summary_len;
         entries.insert(
             url.to_string(),
@@ -143,10 +165,10 @@ fn decode(bytes: &[u8], header: u64) -> Option<HashMap<String, Entry>> {
     Some(entries)
 }
 
-fn read_u16(bytes: &[u8], cursor: &mut usize) -> Option<usize> {
-    let value = u16::from_le_bytes(bytes.get(*cursor..*cursor + 2)?.try_into().ok()?);
-    *cursor += 2;
-    Some(usize::from(value))
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> Option<usize> {
+    let value = u32::from_le_bytes(bytes.get(*cursor..*cursor + 4)?.try_into().ok()?);
+    *cursor += 4;
+    usize::try_from(value).ok()
 }
 
 #[cfg(test)]
@@ -179,6 +201,28 @@ mod tests {
 
         let stale = Fingerprints::load(&root, 43);
         assert!(stale.is_empty(), "header change invalidates the cache");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn round_trips_a_summary_larger_than_64_kib() {
+        let root = std::env::temp_dir().join(format!("agno-cache-big-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let summary = "ş".repeat(100_000);
+        let cache = Fingerprints::load(&root, 1);
+        cache
+            .save(&root, [("/a/", 7, summary.as_str())].into_iter())
+            .unwrap();
+
+        let loaded = Fingerprints::load(&root, 1);
+        assert_eq!(
+            loaded.summary("/a/", 7).map(str::len),
+            Some(summary.len()),
+            "a long summary must survive the round trip uncut"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

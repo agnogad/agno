@@ -54,6 +54,11 @@ impl Default for Config {
 
 impl Config {
     pub fn load(root: &Path) -> Result<Self> {
+        // Without this, `agno build -r typo` creates the directory and an empty
+        // site inside it instead of reporting the mistake.
+        if !root.is_dir() {
+            bail!("site root {} does not exist", root.display());
+        }
         let path = root.join("agno.toml");
         let mut cfg: Config = if path.is_file() {
             let src = std::fs::read_to_string(&path)
@@ -92,6 +97,18 @@ impl Config {
 
     /// Reject output paths that could delete the site or another input directory.
     pub fn validate(&self) -> Result<()> {
+        // Canonical links, the sitemap and the feed all concatenate this with
+        // a page path, so a bare host name silently produces relative URLs in
+        // every one of them.
+        if !self.base_url.is_empty()
+            && !(self.base_url.starts_with("http://") || self.base_url.starts_with("https://"))
+        {
+            bail!(
+                "base_url must be an absolute http(s) URL, found \"{}\"",
+                self.base_url
+            );
+        }
+
         let root = normalize(&self.root);
         let output = normalize(&self.output());
 

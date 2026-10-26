@@ -1,3 +1,4 @@
+use agno::content::Drafts;
 use agno::site::{BuildOptions, build};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -78,6 +79,43 @@ fn builds_pages_lists_feeds_and_taxonomies() {
 
     assert!(root.join("dist/style.css").exists());
     assert!(!root.join("dist/blog/draft/index.html").exists());
+}
+
+#[test]
+fn generated_links_are_not_slash_escaped() {
+    let root = fixture("escaping");
+    build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap();
+
+    for name in [
+        "dist/index.html",
+        "dist/blog/index.html",
+        "dist/blog/hello/index.html",
+        "dist/tags/rust/index.html",
+        "dist/tags/index.html",
+        "dist/404.html",
+    ] {
+        let html = text(&root.join(name));
+        assert!(
+            !html.contains("&#x2f;"),
+            "{name} still escapes slashes in links"
+        );
+    }
+
+    let post = text(&root.join("dist/blog/hello/index.html"));
+    assert!(post.contains(r#"<link rel="canonical" href="https://example.com/blog/hello/">"#));
+    assert!(post.contains(r#"<a href="/tags/rust/">"#));
+
+    let index = text(&root.join("dist/index.html"));
+    assert!(index.contains(r#"<a href="/blog/hello/">Hello</a>"#));
+    assert!(index.contains(r#"<a href="/about/">About</a>"#));
 }
 
 #[test]
@@ -538,8 +576,9 @@ fn a_missing_page_template_is_an_error() {
             minify: false,
         },
     )
-    .unwrap_err()
-    .to_string();
+    .map(|_| ())
+    .unwrap_err();
+    let err = format!("{err:#}");
     assert!(err.contains("template nope.html not found"), "{err}");
 }
 
@@ -860,7 +899,7 @@ fn check_scans_home_and_section_bodies() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(!report.ok(), "a broken _index.md link must fail the check");
     assert!(
         report
@@ -891,7 +930,7 @@ fn check_validates_anchor_targets() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     for anchor in ["#nope", "#missing", "#fake-id", "#fenced-id"] {
         assert!(
             report.errors.iter().any(|error| error.contains(anchor)),
@@ -913,7 +952,7 @@ fn check_validates_anchor_targets() {
 #[test]
 fn check_accepts_a_clean_site() {
     let root = fixture("check-clean");
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(report.ok(), "{:?}", report.errors);
     assert_eq!(report.pages, 2);
 }
@@ -927,7 +966,7 @@ fn check_reports_broken_internal_links() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(!report.ok());
     assert!(
         report.errors.iter().any(|error| error.contains("/nope/")),
@@ -953,7 +992,7 @@ fn check_flags_a_missing_page_template() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(
         report
             .errors
@@ -1012,7 +1051,7 @@ fn a_no_op_rebuild_leaves_generated_files_untouched() {
     build_incremental(&root);
     let rss = root.join("dist/rss.xml");
     let sitemap = root.join("dist/sitemap.xml");
-    let manifest = root.join(".agno-cache/outputs.json");
+    let manifest = manifest_of(&root);
     let before = (modified(&rss), modified(&sitemap), modified(&manifest));
 
     build_incremental(&root);
@@ -1022,6 +1061,24 @@ fn a_no_op_rebuild_leaves_generated_files_untouched() {
         (modified(&rss), modified(&sitemap), modified(&manifest)),
         "a rebuild rewrote a feed or the manifest even though nothing changed"
     );
+}
+
+/// The build manifest is stored per output directory, so its file name carries
+/// a hash of that path.
+fn manifest_of(root: &Path) -> PathBuf {
+    let cache = root.join(".agno-cache");
+    let mut found: Vec<PathBuf> = fs::read_dir(&cache)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("outputs-") && name.ends_with(".json"))
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "expected exactly one build manifest");
+    found.pop().unwrap()
 }
 
 #[test]
@@ -1111,7 +1168,7 @@ fn page_bundle_assets_are_copied_and_checked() {
         fs::read(root.join("dist/blog/photo/photo.jpg")).unwrap(),
         b"jpeg-bytes"
     );
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(report.ok(), "{:?}", report.errors);
 
     fs::remove_file(root.join("content/blog/photo/photo.jpg")).unwrap();
@@ -1134,7 +1191,7 @@ fn check_decodes_percent_escaped_links_and_skips_other_schemes() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(report.ok(), "{:?}", report.errors);
 }
 
@@ -1156,7 +1213,7 @@ fn a_static_file_cannot_silently_replace_a_page() {
     .to_string();
     assert!(err.contains("duplicate output URL"), "{err}");
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     assert!(!report.ok());
     assert!(
         report
@@ -1207,8 +1264,746 @@ fn check_reports_source_lines_and_reference_links() {
     )
     .unwrap();
 
-    let report = agno::check::check(&root, false).unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
     let errors = report.errors.join("\n");
     assert!(errors.contains("lines.md:6"), "{errors}");
     assert!(errors.contains("lines.md:8"), "{errors}");
+}
+
+/// A docs-shaped section: three pages, no dates, explicit weights.
+fn docs_fixture(name: &str, sort_by: &str) -> PathBuf {
+    let root = fixture(name);
+    fs::create_dir_all(root.join("content/docs")).unwrap();
+    fs::write(
+        root.join("content/docs/_index.md"),
+        format!("+++\ntitle = \"Docs\"\nsort_by = \"{sort_by}\"\n+++\n"),
+    )
+    .unwrap();
+    for (slug, title, weight) in [
+        ("usage", "Usage", 30),
+        ("intro", "Intro", 10),
+        ("install", "Install", 20),
+    ] {
+        fs::write(
+            root.join(format!("content/docs/{slug}.md")),
+            format!("+++\ntitle = \"{title}\"\nweight = {weight}\n+++\n\nBody of {title}.\n"),
+        )
+        .unwrap();
+    }
+    root
+}
+
+fn build_once(root: &Path, clean: bool) {
+    build(
+        root,
+        &BuildOptions {
+            drafts: false,
+            clean,
+            minify: false,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn weight_orders_a_section_and_links_neighbours() {
+    let root = docs_fixture("docs-weight", "weight");
+    build_once(&root, true);
+
+    let listing = text(&root.join("dist/docs/index.html"));
+    let intro = listing.find(">Intro<").expect("intro card");
+    let install = listing.find(">Install<").expect("install card");
+    let usage = listing.find(">Usage<").expect("usage card");
+    assert!(intro < install && install < usage, "{listing}");
+
+    let intro_page = text(&root.join("dist/docs/intro/index.html"));
+    assert!(!intro_page.contains("rel=\"prev\""), "{intro_page}");
+    assert!(intro_page.contains("rel=\"next\" href=\"/docs/install/\""));
+
+    let install_page = text(&root.join("dist/docs/install/index.html"));
+    assert!(install_page.contains("rel=\"prev\" href=\"/docs/intro/\""));
+    assert!(install_page.contains("rel=\"next\" href=\"/docs/usage/\""));
+
+    let usage_page = text(&root.join("dist/docs/usage/index.html"));
+    assert!(usage_page.contains("rel=\"prev\" href=\"/docs/install/\""));
+    assert!(!usage_page.contains("rel=\"next\""), "{usage_page}");
+}
+
+#[test]
+fn sort_by_title_orders_a_section_alphabetically() {
+    let root = docs_fixture("docs-title", "title");
+    build_once(&root, true);
+
+    let listing = text(&root.join("dist/docs/index.html"));
+    let install = listing.find(">Install<").expect("install card");
+    let intro = listing.find(">Intro<").expect("intro card");
+    let usage = listing.find(">Usage<").expect("usage card");
+    assert!(install < intro && intro < usage, "{listing}");
+
+    let intro_page = text(&root.join("dist/docs/intro/index.html"));
+    assert!(intro_page.contains("rel=\"prev\" href=\"/docs/install/\""));
+    assert!(intro_page.contains("rel=\"next\" href=\"/docs/usage/\""));
+}
+
+#[test]
+fn pagination_follows_the_section_order() {
+    let root = docs_fixture("docs-paginated-weight", "weight");
+    fs::write(
+        root.join("content/docs/_index.md"),
+        "+++\ntitle = \"Docs\"\nsort_by = \"weight\"\npaginate_by = 1\n+++\n",
+    )
+    .unwrap();
+    build_once(&root, true);
+
+    let first = text(&root.join("dist/docs/index.html"));
+    assert!(first.contains(">Intro<"), "{first}");
+    let second = text(&root.join("dist/docs/page/2/index.html"));
+    assert!(second.contains(">Install<"), "{second}");
+    let third = text(&root.join("dist/docs/page/3/index.html"));
+    assert!(third.contains(">Usage<"), "{third}");
+}
+
+#[test]
+fn a_section_sorts_by_date_unless_told_otherwise() {
+    let root = fixture("docs-default-order");
+    fs::write(
+        root.join("content/blog/second.md"),
+        "+++\ntitle = \"Second\"\ndate = 2024-06-02\n+++\n\nLater.\n",
+    )
+    .unwrap();
+    build_once(&root, true);
+
+    let listing = text(&root.join("dist/blog/index.html"));
+    let hello = listing.find(">Hello<").expect("hello card");
+    let second = listing.find(">Second<").expect("second card");
+    assert!(second < hello, "{listing}");
+    assert!(
+        text(&root.join("dist/blog/hello/index.html"))
+            .contains("rel=\"prev\" href=\"/blog/second/\""),
+        "the older post points back at the newer one"
+    );
+}
+
+#[test]
+fn the_home_page_honours_sort_by() {
+    let root = fixture("home-sort");
+    fs::write(
+        root.join("content/_index.md"),
+        "+++\ntitle = \"Home\"\nsort_by = \"weight\"\n+++\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/heavy.md"),
+        "+++\ntitle = \"Heavy\"\nweight = 2\ndate = 2024-07-01\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/light.md"),
+        "+++\ntitle = \"Light\"\nweight = 1\ndate = 2024-01-01\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    build_once(&root, true);
+
+    // Date order would put Heavy first; the home page asked for weight.
+    let home = text(&root.join("dist/index.html"));
+    let light = home.find(">Light<").expect("light card");
+    let heavy = home.find(">Heavy<").expect("heavy card");
+    assert!(light < heavy, "{home}");
+}
+
+#[test]
+fn an_unknown_sort_by_is_rejected() {
+    let root = docs_fixture("docs-bad-sort", "popular");
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("invalid sort_by \"popular\""), "{err}");
+    assert!(err.contains("date"), "{err}");
+}
+
+#[test]
+fn changing_a_neighbours_date_rerenders_the_page() {
+    let root = fixture("neighbour-date");
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/page.html"),
+        "{{ page.title }}|prev={{ page.prev.date_display }}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/second.md"),
+        "+++\ntitle = \"Second\"\ndate = 2024-06-02\n+++\n\nLater.\n",
+    )
+    .unwrap();
+    build_once(&root, true);
+    let before = text(&root.join("dist/blog/hello/index.html"));
+    assert!(before.contains("June 2, 2024"), "{before}");
+
+    // Only the neighbour changes; hello itself is untouched, but what it
+    // renders about its neighbour is not.
+    fs::write(
+        root.join("content/blog/second.md"),
+        "+++\ntitle = \"Second\"\ndate = 2024-06-03\n+++\n\nLater.\n",
+    )
+    .unwrap();
+    build_once(&root, false);
+
+    let after = text(&root.join("dist/blog/hello/index.html"));
+    assert!(after.contains("June 3, 2024"), "{after}");
+}
+
+#[test]
+fn inserting_a_page_rerenders_its_neighbours() {
+    let root = fixture("docs-insert");
+    fs::create_dir_all(root.join("content/docs")).unwrap();
+    fs::write(
+        root.join("content/docs/_index.md"),
+        "+++\ntitle = \"Docs\"\nsort_by = \"weight\"\n+++\n",
+    )
+    .unwrap();
+    for (slug, title, weight) in [("a", "Alpha", 10), ("c", "Gamma", 30)] {
+        fs::write(
+            root.join(format!("content/docs/{slug}.md")),
+            format!("+++\ntitle = \"{title}\"\nweight = {weight}\n+++\n\nBody.\n"),
+        )
+        .unwrap();
+    }
+    build_once(&root, true);
+    let last = text(&root.join("dist/docs/c/index.html"));
+    assert!(last.contains("rel=\"prev\" href=\"/docs/a/\""));
+
+    // A new page in the middle changes what both existing pages link to, even
+    // though neither of them was edited.
+    fs::write(
+        root.join("content/docs/b.md"),
+        "+++\ntitle = \"Beta\"\nweight = 20\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    build_once(&root, false);
+
+    let first = text(&root.join("dist/docs/a/index.html"));
+    assert!(first.contains("rel=\"next\" href=\"/docs/b/\""), "{first}");
+    let middle = text(&root.join("dist/docs/b/index.html"));
+    assert!(middle.contains("rel=\"prev\" href=\"/docs/a/\""));
+    assert!(middle.contains("rel=\"next\" href=\"/docs/c/\""));
+    let last = text(&root.join("dist/docs/c/index.html"));
+    assert!(last.contains("rel=\"prev\" href=\"/docs/b/\""), "{last}");
+}
+
+// ---- correctness sweep -------------------------------------------------
+
+#[test]
+fn a_section_and_the_home_page_can_pick_their_template() {
+    let root = fixture("template-override");
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/list.html"),
+        "{% extends \"base.html\" %}{% block content %}<p id=\"list\">{{ page.title }}:{{ pages | length }}</p>{% endblock %}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\ntemplate = \"list.html\"\n+++\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/_index.md"),
+        "+++\ntitle = \"Home\"\ntemplate = \"list.html\"\n+++\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let blog = text(&root.join("dist/blog/index.html"));
+    assert!(blog.contains("<p id=\"list\">Blog:1</p>"), "{blog}");
+    let home = text(&root.join("dist/index.html"));
+    assert!(home.contains("<p id=\"list\">Home:2</p>"), "{home}");
+}
+
+#[test]
+fn a_missing_section_template_fails_the_build_and_the_check() {
+    let root = fixture("template-missing");
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\ntemplate = \"nope.html\"\n+++\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .map(|_| ())
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("template nope.html not found"), "{err}");
+
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("template nope.html does not exist")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn the_home_page_reads_its_frontmatter_dates() {
+    let root = fixture("home-dates");
+    fs::write(
+        root.join("content/_index.md"),
+        "+++\ntitle = \"Home\"\ndate = 2024-03-04\nupdated = 2024-03-05\n+++\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    // A list page renders no dates itself, but the sitemap wants the home
+    // page's `lastmod`, which needs the frontmatter to be parsed at all.
+    let sitemap = text(&root.join("dist/sitemap.xml"));
+    assert!(
+        sitemap.contains("<loc>https://example.com/</loc><lastmod>2024-03-05"),
+        "{sitemap}"
+    );
+}
+
+#[test]
+fn a_term_that_slugifies_to_an_existing_one_links_once() {
+    let root = fixture("term-dedupe");
+    fs::write(
+        root.join("content/blog/hello.md"),
+        "+++\ntitle = \"Hello\"\ndate = 2024-05-01\ntags = [\"Rust\", \"rust\", \"!!!\"]\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let post = text(&root.join("dist/blog/hello/index.html"));
+    assert_eq!(
+        post.matches("href=\"/tags/rust/\"").count(),
+        1,
+        "duplicate tag links: {post}"
+    );
+    assert!(!post.contains("/tags//"), "{post}");
+}
+
+#[test]
+fn a_nonexistent_site_root_is_an_error() {
+    let root = std::env::temp_dir().join(format!("agno-missing-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("does not exist"), "{err}");
+    assert!(!root.exists(), "the build created the missing root");
+}
+
+#[test]
+fn check_accepts_the_top_fragment() {
+    let root = fixture("check-top");
+    fs::write(
+        root.join("content/blog/hello.md"),
+        "+++\ntitle = \"Hello\"\ndate = 2024-05-01\n+++\n\n[up](#top) and [bad](#nope)\n",
+    )
+    .unwrap();
+    let report = agno::check::check(&root, Drafts::Skip).unwrap();
+
+    assert!(
+        !report.errors.iter().any(|error| error.contains("#top")),
+        "{:?}",
+        report.errors
+    );
+    assert!(
+        report.errors.iter().any(|error| error.contains("#nope")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn feed_urls_percent_encode_spaces() {
+    let root = fixture("feed-encoding");
+    fs::write(
+        root.join("content/about.md"),
+        "+++\ntitle = \"About\"\ndate = 2024-01-01\nurl = \"/my page/\"\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let sitemap = text(&root.join("dist/sitemap.xml"));
+    assert!(sitemap.contains("/my%20page/"), "{sitemap}");
+    let rss = text(&root.join("dist/rss.xml"));
+    assert!(
+        rss.contains("<link>https://example.com/my%20page/</link>"),
+        "{rss}"
+    );
+}
+
+#[test]
+fn switching_the_output_dir_back_removes_stale_files() {
+    let root = fixture("output-switch");
+    build_incremental(&root);
+
+    fs::write(
+        root.join("agno.toml"),
+        "title = \"Test Site\"\nbase_url = \"https://example.com\"\noutput_dir = \"public\"\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    fs::remove_file(root.join("content/blog/hello.md")).unwrap();
+    build_incremental(&root);
+
+    fs::write(
+        root.join("agno.toml"),
+        "title = \"Test Site\"\nbase_url = \"https://example.com\"\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    assert!(
+        !root.join("dist/blog/hello/index.html").exists(),
+        "the deleted page survived in dist"
+    );
+}
+
+#[test]
+fn frontmatter_that_is_not_a_mapping_is_rejected() {
+    let root = fixture("frontmatter-mapping");
+    fs::write(
+        root.join("content/about.md"),
+        "---\nSome text\n---\n\nBody.\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .map(|_| ())
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("must be a mapping"), "{err}");
+    assert!(err.contains("about.md"), "{err}");
+}
+
+#[test]
+fn an_empty_frontmatter_block_is_not_rendered_as_content() {
+    let root = fixture("frontmatter-empty");
+    fs::write(root.join("content/about.md"), "---\n---\n\nJust body.\n").unwrap();
+    build_incremental(&root);
+
+    let about = text(&root.join("dist/about/index.html"));
+    assert!(about.contains("Just body."), "{about}");
+    assert!(
+        !about.contains("<hr"),
+        "the frontmatter rules leaked: {about}"
+    );
+}
+
+#[test]
+fn a_long_frontmatter_summary_survives_a_rebuild() {
+    let root = fixture("long-summary");
+    let summary = "ş".repeat(70_000);
+    fs::write(
+        root.join("content/about.md"),
+        format!(
+            "+++\ntitle = \"About\"\ndate = 2024-01-01\nsummary = \"{summary}\"\n+++\n\nBody.\n"
+        ),
+    )
+    .unwrap();
+    build_incremental(&root);
+    let first = text(&root.join("dist/index.html"));
+
+    build_incremental(&root);
+    let second = text(&root.join("dist/index.html"));
+    assert_eq!(first, second, "the cached summary was truncated");
+    assert!(second.contains(&summary), "the full summary is missing");
+}
+
+// ---- static overrides ---------------------------------------------------
+
+#[test]
+fn a_static_file_overrides_generated_output_of_the_same_length() {
+    let root = fixture("static-same-length");
+    let generated = format!(
+        "User-agent: *\nAllow: /\n\nSitemap: {}/sitemap.xml\n",
+        "https://example.com"
+    );
+    let mut custom = String::from("User-agent: *\nDisallow: /\n");
+    custom.push_str(&"#".repeat(generated.len() - custom.len() - 1));
+    custom.push('\n');
+    assert_eq!(custom.len(), generated.len(), "the test needs a tie");
+
+    fs::create_dir_all(root.join("static")).unwrap();
+    fs::write(root.join("static/robots.txt"), &custom).unwrap();
+
+    build_incremental(&root);
+    assert_eq!(
+        text(&root.join("dist/robots.txt")),
+        custom,
+        "the generated robots.txt replaced a same-length static override"
+    );
+
+    build_incremental(&root);
+    assert_eq!(
+        text(&root.join("dist/robots.txt")),
+        custom,
+        "the override survived one build but not two"
+    );
+}
+
+#[test]
+fn a_static_index_html_overrides_the_home_page_of_the_same_length() {
+    let root = fixture("static-index");
+    build_incremental(&root);
+    let generated = text(&root.join("dist/index.html"));
+
+    let mut custom = String::from("<!doctype html><title>static</title>");
+    custom.push_str(&" ".repeat(generated.len() - custom.len() - 6));
+    custom.push_str("</x>  ");
+    assert_eq!(custom.len(), generated.len());
+
+    fs::create_dir_all(root.join("static")).unwrap();
+    fs::write(root.join("static/index.html"), &custom).unwrap();
+    // Force the page to be rendered again, so the copy races a fresh write of
+    // the same length rather than an older one.
+    fs::remove_dir_all(root.join("dist")).unwrap();
+    build_incremental(&root);
+
+    assert_eq!(
+        text(&root.join("dist/index.html")),
+        custom,
+        "the rendered home page replaced a same-length static override"
+    );
+}
+
+#[test]
+fn a_date_that_is_not_a_date_is_an_error() {
+    let root = fixture("bad-date");
+    fs::write(
+        root.join("content/about.md"),
+        "+++\ntitle = \"About\"\ndate = \"yesterday\"\n+++\n\nBody.\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("invalid date \"yesterday\""), "{err}");
+    assert!(err.contains("about.md"), "{err}");
+}
+
+#[test]
+fn a_base_url_without_a_scheme_is_an_error() {
+    let root = fixture("bad-base-url");
+    fs::write(
+        root.join("agno.toml"),
+        "title = \"Test Site\"\nbase_url = \"example.com\"\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("base_url must be an absolute"), "{err}");
+}
+
+#[test]
+fn a_user_template_gets_clean_urls_and_escaped_text() {
+    let root = fixture("user-escaping");
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/page.html"),
+        "{% extends \"base.html\" %}{% block content %}<a id=\"u\" href=\"{{ page.url }}\">{{ page.title }}</a><div id=\"c\">{{ page.content|safe }}</div>{% endblock %}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/amp.md"),
+        "+++\ntitle = \"A & B <c>\"\ndate = 2024-06-01\n+++\n\nText & more.\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let html = text(&root.join("dist/blog/amp/index.html"));
+    assert!(
+        html.contains("<a id=\"u\" href=\"/blog/amp/\">A &amp; B &lt;c&gt;</a>"),
+        "{html}"
+    );
+    assert!(!html.contains("&#x2f;"), "{html}");
+}
+
+// ---- review findings ----------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_static_directory_fails_the_build() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("static-unreadable");
+    fs::create_dir_all(root.join("static/locked")).unwrap();
+    fs::write(root.join("static/locked/hidden.txt"), "hidden").unwrap();
+    let locked = root.join("static/locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Root ignores the mode bits, so the walk would succeed and the test would
+    // fail for the wrong reason. Nothing to assert in that environment.
+    if fs::read_dir(&locked).is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let result = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    );
+
+    // Restore the mode before asserting, so a failure still cleans up.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let err = result
+        .expect_err("an unreadable static directory must fail the build")
+        .to_string();
+    assert!(err.contains("locked"), "{err}");
+}
+
+#[test]
+fn paginate_by_zero_is_treated_as_no_pagination() {
+    let root = fixture("paginate-zero");
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\npaginate_by = 0\n+++\n",
+    )
+    .unwrap();
+    for i in 0..2 {
+        fs::write(
+            root.join(format!("content/blog/p{i}.md")),
+            format!(
+                "+++\ntitle = \"Post {i}\"\ndate = 2024-02-0{}\n+++\n\nBody.\n",
+                i + 1
+            ),
+        )
+        .unwrap();
+    }
+
+    // A zero page size used to reach `slice::chunks(0)` and panic.
+    build_incremental(&root);
+
+    assert!(root.join("dist/blog/index.html").exists());
+    assert!(!root.join("dist/blog/page/2/index.html").exists());
+}
+
+#[test]
+fn paginate_by_equal_to_the_page_count_does_not_split() {
+    let root = fixture("paginate-exact");
+    // The fixture ships one post in blog/, so two more make three.
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\npaginate_by = 3\n+++\n",
+    )
+    .unwrap();
+    for i in 0..2 {
+        fs::write(
+            root.join(format!("content/blog/p{i}.md")),
+            format!(
+                "+++\ntitle = \"Post {i}\"\ndate = 2024-02-0{} \n+++\n\nBody.\n",
+                i + 1
+            ),
+        )
+        .unwrap();
+    }
+    build_incremental(&root);
+
+    let listing = text(&root.join("dist/blog/index.html"));
+    assert!(!listing.contains("rel=\"next\""), "{listing}");
+    assert!(!root.join("dist/blog/page/2/index.html").exists());
+}
+
+#[test]
+fn clean_removes_the_output_and_the_cache() {
+    let root = fixture("clean");
+    build_incremental(&root);
+    assert!(root.join("dist").is_dir());
+    assert!(root.join(".agno-cache").is_dir());
+
+    let output = agno::site::clean(&root).unwrap();
+
+    assert_eq!(output, root.join("dist"));
+    assert!(!root.join("dist").exists(), "dist survived clean");
+    assert!(!root.join(".agno-cache").exists(), "cache survived clean");
+    assert!(
+        root.join("content/blog/hello.md").exists(),
+        "clean ate content"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_reports_a_directory_it_cannot_empty() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("clean-locked");
+    build_incremental(&root);
+    let locked = root.join("dist/locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::write(locked.join("file.txt"), "x").unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Root can write regardless of the mode, so there is nothing to test.
+    if fs::write(locked.join("probe"), "x").is_ok() {
+        let _ = fs::remove_file(locked.join("probe"));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let result = agno::site::clean(&root);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let err = result
+        .expect_err("clean must not report success when a file survives")
+        .to_string();
+    assert!(err.contains("removing"), "{err}");
+    assert!(
+        locked.join("file.txt").exists(),
+        "the test directory was emptied anyway"
+    );
 }

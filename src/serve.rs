@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::content::Drafts;
 use crate::site::{self, BuildOptions};
 use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
@@ -11,21 +12,22 @@ use tiny_http::{Header, Request, Response, Server};
 
 const LIVE_SCRIPT: &str = r#"<script>(()=>{let v=null;setInterval(async()=>{try{const t=await (await fetch('/__agno/live',{cache:'no-store'})).text();if(v===null)v=t;else if(v!==t)location.reload()}catch(e){}},400)})();</script>"#;
 
-pub fn dev(root: PathBuf, port: u16, drafts: bool) -> Result<()> {
+pub fn dev(root: &Path, port: u16, drafts: Drafts) -> Result<()> {
     // Watch paths come back relative to the directory handed to `watch`, so a
     // canonical root keeps them comparable with the output directory.
     let root = root
         .canonicalize()
         .with_context(|| format!("resolving {}", root.display()))?;
     let opts = BuildOptions {
-        drafts,
+        drafts: drafts.includes(),
         clean: true,
         minify: false,
     };
     let stats = site::build(&root, &opts)?;
     println!(
         "agno dev → http://localhost:{port}  ({} pages, {} ms)",
-        stats.pages, stats.ms_total
+        stats.pages,
+        stats.total.as_millis()
     );
 
     let cfg = Config::load(&root)?;
@@ -87,7 +89,7 @@ pub fn dev(root: PathBuf, port: u16, drafts: bool) -> Result<()> {
         match site::build(
             &root,
             &BuildOptions {
-                drafts,
+                drafts: drafts.includes(),
                 clean: false,
                 minify: false,
             },

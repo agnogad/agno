@@ -160,8 +160,9 @@ also drops the cache.
 `agno check` resolves every internal Markdown link and image against the files
 the build will produce, and fails with exit code 1 when something is missing.
 It scans page bodies and `_index.md` landing pages, follows `#fragment`
-targets to the headings they name, and reports pages whose `template` does not
-exist and pages without a date.
+targets to the headings they name (`#top` always resolves, as browsers scroll
+to the top for it), and reports pages whose `template` does not exist and
+pages without a date.
 
 ```sh
 $ agno check
@@ -183,6 +184,7 @@ description = "A short summary used in lists and meta tags."
 tags = ["rust", "static-sites"]
 categories = ["engineering"]
 draft = false
+weight = 10              # position in a section ordered by weight
 template = "post.html"   # optional override
 slug = "hello-agno"      # optional
 url = "/hello/"          # optional
@@ -199,6 +201,7 @@ Body in **Markdown**.
 | `description` | Meta description and list summary |
 | `summary` | Explicit summary, overriding the first paragraph |
 | `draft` | Excluded from builds unless `--drafts` is passed |
+| `weight` | Position inside a section ordered with `sort_by = "weight"`; lower comes first |
 | `tags`, `categories` | Taxonomy values; each gets a term page and a taxonomy overview |
 | `template` | Template name for this page |
 | `slug` | Override the generated slug |
@@ -209,24 +212,65 @@ Any other frontmatter field is available to templates as
 `page.extra.<name>`.
 
 Section indexes (`content/blog/_index.md`) additionally accept `paginate_by`,
-which splits the section listing into pages of that many cards:
+which splits the section listing into pages of that many cards, `sort_by`,
+which decides the order, and `template`, which renders the listing with a
+layout other than `section.html`:
 
 ```toml
 +++
 title = "Blog"
 paginate_by = 10
+sort_by = "weight"
+template = "blog.html"
 +++
 ```
 
 Page 1 stays at `/blog/`; the rest live at `/blog/page/2/`, `/blog/page/3/`,
-and so on, and are linked through `page.paginator` in `section.html`.
+and so on, and are linked through `page.paginator` in `section.html`. The home
+page (`content/_index.md`) takes `sort_by` and `template` too; pagination is a
+section feature. `agno check` reports a `template` that does not exist.
 
-A directory under `content/` becomes a section. A file named `index.md` turns
-its directory into a page bundle:
+### Ordering and navigation
+
+`sort_by` takes one of three values, whether it sits in a section's `_index.md`
+or in the home page's:
+
+| Value | Order |
+| --- | --- |
+| `date` | Newest first; the default, and what a blog wants |
+| `weight` | `weight` ascending, then date, then title — the documentation order |
+| `title` | A–Z by title |
+
+Anything else fails the build with the offending value and the file it came
+from, so a typo cannot silently fall back to date order. Pages without a
+`weight` count as `0`, and pages without a date sort after dated ones of the
+same weight.
+
+Pages in a section are also linked to their neighbours: `page.prev` and
+`page.next` follow the section's own order, so a docs site walks chapter by
+chapter and a blog walks newest to oldest. Both are `null` at the ends of the
+section.
+
+```html
+{% if page.prev %}<a rel="prev" href="{{ page.prev.url }}">{{ page.prev.title }}</a>{% endif %}
+{% if page.next %}<a rel="next" href="{{ page.next.url }}">{{ page.next.title }}</a>{% endif %}
+```
+
+Each neighbour is `{ title, url, date_display }`. Changing the order, adding a
+page or renaming one re-renders the pages around it on the next build, because
+their navigation changed too.
+
+A directory that directly contains pages becomes a section, at any depth, and
+gets a listing at its own URL. A directory that only holds subdirectories is
+not a section by itself: give it an `_index.md` if you want a landing page
+there. A file named `index.md` turns its directory into a page bundle:
 
 ```text
 content/blog/hello/index.md  →  /blog/hello/
 ```
+
+Content files end in `.md` or `.markdown`, in any case, so `POST.MD` and
+`Index.md` are picked up too.
 
 Filenames can start with a date. `2024-05-01-hello.md` sets the date and derives
 the slug automatically. URL path segments are slugified, `slug` overrides the
@@ -267,6 +311,7 @@ back to them, so a site still builds without a `templates/` directory.
 | `page.updated`, `page.updated_display` | The `updated` frontmatter date, if set |
 | `page.words`, `page.toc`, `page.toc_html` | Word count, heading tree (`level`, `id`, `title`, `children`), and the same tree rendered as nested `<ul>` |
 | `page.paginator` | Pagination state on section pages: `current`, `total`, `page_size`, `item_count`, `prev_url`, `next_url`, `first_url`, `last_url`, `links[]` |
+| `page.prev`, `page.next` | Neighbouring pages in the section's order: `title`, `url`, `date_display`; `null` at the ends |
 | `page.terms[]` | Taxonomy overview pages only: `name`, `url`, `count` for each term |
 | `pages[].title`, `.url`, `.date`, `.date_display`, `.datetime`, `.reading_minutes`, `.summary`, `.tags`, `.section` | Page cards in list templates |
 
@@ -278,6 +323,15 @@ The default templates are `base.html`, `page.html`, `section.html`,
 `index.html`, `taxonomy.html`, and `404.html`. Add `tag.html` or `category.html`
 to use a dedicated layout for those term pages. Filters include `slugify`,
 `starts_with`, `safe`, and the MiniJinja built-ins.
+
+Autoescaping is on for HTML, and it escapes only the characters that are
+special in text or in a quoted attribute, so a path stays readable:
+
+```html
+<a href="{{ page.url }}">{{ page.title }}</a>
+```
+
+`page.content` is already rendered HTML, so it still needs `|safe`.
 
 ```html
 {% extends "base.html" %}
@@ -318,6 +372,9 @@ url = "/about/"
 
 Set `search_index = true` to emit `search-index.json` for client-side search.
 `page.date_display` follows `language` for Turkish and English month names.
+`base_url` must be an absolute `http(s)` URL: canonical links, the sitemap and
+the feed are built from it, so a bare host name would make every one of them
+relative.
 `output_dir` must stay inside the site root and must not overlap `content_dir`,
 `templates_dir`, or `static_dir`; agno rejects unsafe values instead of deleting
 your inputs.

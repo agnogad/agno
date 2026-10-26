@@ -124,6 +124,18 @@ h1 { font-size: 1.9rem; margin: 0 0 1rem; }
 .pagination a { text-decoration: none; }
 .pagination-info { color: var(--muted); font-variant-numeric: tabular-nums; }
 
+.page-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.95rem;
+}
+.page-nav a { text-decoration: none; }
+.page-nav a[rel="next"] { text-align: right; }
+
 footer {
   margin-top: 4rem;
   padding-top: 1rem;
