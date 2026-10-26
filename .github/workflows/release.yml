@@ -110,6 +110,11 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --generate-notes
-          gh release upload "$tag" dist/* --clobber
-          gh release view "$tag" --json assets --jq '.assets[].name'
+          # -R everywhere: this job deliberately has no checkout, and without it
+          # gh tries to work out the repository from the current directory and
+          # dies with "fatal: not a git repository".
+          repo="$GITHUB_REPOSITORY"
+          gh release view "$tag" -R "$repo" >/dev/null 2>&1 \
+            || gh release create "$tag" -R "$repo" --title "$tag" --generate-notes
+          gh release upload "$tag" dist/* -R "$repo" --clobber
+          gh release view "$tag" -R "$repo" --json assets --jq '.assets[].name'
