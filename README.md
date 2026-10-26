@@ -101,39 +101,35 @@ from a laptop.
 
 #### Linux: gnu or musl
 
-There are two Linux archives, and they are not equivalent.
+There are two Linux archives, and they differ in more than libc.
 
 | | `x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-musl` |
 |---|---|---|
 | runs on | glibc 2.34+ (Ubuntu 22.04, Debian 12, RHEL 9) | any x86_64 Linux, fully static |
-| 3000 posts, no code, 12 threads | 0.10 s / 38 MB | 0.11 s / 118 MB |
-| 3000 posts, no code, 1 thread | 0.23 s / 23 MB | 0.27 s / 55 MB |
-| 1000 posts with code, 12 threads | 0.06 s / 20 MB | **0.72 s** / 89 MB |
-| 1000 posts with code, 1 thread | 0.16 s / 19 MB | 0.21 s / 39 MB |
+| 1000 posts, no code, 12 threads | 0.06 s / 19 MB | 0.08 s / 80 MB |
+| 1000 posts with code, 12 threads | 0.09 s / 19 MB | 0.19 s / 117 MB |
+| regex engine | Oniguruma (C) | fancy-regex (Rust) |
 
-Take **gnu** unless it will not start. It is the only one of the two that
-scales on a site with syntax highlighting, and it uses a third of the memory.
+Take **gnu** unless it will not start: it is about twice as fast on a site with
+code blocks and uses a fraction of the memory. Take **musl** for an Alpine or
+`scratch` container, or for anything older than glibc 2.34, where the gnu
+archive fails at startup with `GLIBC_2.34 not found`.
 
-Take **musl** for an Alpine or `scratch` container, or for anything older than
-glibc 2.34, where the gnu archive fails at startup with `GLIBC_2.34 not found`
-— but read the next paragraph first.
+They use different regex engines because Oniguruma does not scale. It
+serialises on a global lock that glibc's mutex absorbs and musl's does not: with
+it, the static build took 0.21 s on one thread and 0.72 s on twelve, more cores
+and less throughput. Swapping to syntect's pure-Rust engine fixes that — twelve
+threads become faster than one — at the cost of roughly 2× the highlighting
+work, which is a good trade only where the alternative is not scaling. The
+rendered HTML is byte-identical either way; that was checked by diffing a
+300-post site built with each engine.
 
-> [!WARNING]
-> On the static build, syntax highlighting does not scale: twelve threads are
-> 3× *slower* than one (0.72 s against 0.21 s for 1,000 posts). The cause is
-> Oniguruma, the C regex engine syntect uses — it serialises on a global lock,
-> which glibc's mutex absorbs and musl's does not. It is not the allocator
-> (mimalloc is already in that binary) and not agno's own cache.
->
-> Two ways out: run the static build with `RAYON_NUM_THREADS=1` if your site has
-> code blocks, or build from source with syntect's pure-Rust engine instead of
-> `default-onig` in `Cargo.toml`. The second scales properly on musl (0.12 s at
-> twelve threads, the same as gnu) but costs about 2× on a code-heavy site
-> everywhere else; the rendered HTML is byte-identical either way, which I
-> checked by diffing a 300-post site built with each engine.
+The musl build also uses mimalloc, because musl's allocator has the same
+problem in a milder form, and that is where its memory figures come from.
 
-Medians of seven interleaved cold builds on a 12-core laptop, so read the
-figures as ratios rather than absolutes.
+Medians of seven interleaved cold builds on a 12-core laptop. The machine is
+not quiet, so read these as ratios: two runs of the same binary differed by up
+to 35%.
 
 ### Install from crates.io
 
@@ -159,7 +155,7 @@ cargo install --path .
 
 ```sh
 agno --version
-# agno 0.3.6
+# agno 0.3.7
 ```
 
 ## Quick start

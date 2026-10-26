@@ -1,6 +1,6 @@
 [package]
 name = "agno"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2024"
 rust-version = "1.88"
 description = "A fast, content-first static site generator"
@@ -19,6 +19,17 @@ include = [
     "/LICENSE",
 ]
 
+[features]
+default = ["onig"]
+# Which regex engine syntect uses to highlight code. `onig` is Oniguruma, C,
+# and about twice as fast; `fancy` is pure Rust and about twice as slow, but it
+# scales across threads, which Oniguruma does not: it serialises on a global
+# lock that glibc's mutex absorbs and musl's does not. The static Linux build
+# ships `fancy` for that reason - see the release workflow. Both emit identical
+# HTML.
+onig = ["syntect/default-onig"]
+fancy = ["syntect/default-fancy"]
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -33,7 +44,7 @@ serde_json = "1"
 # the accepted YAML dialect, so that is a deliberate change with its own
 # tests, not a version bump.
 serde_yaml_ng = "0.10"
-syntect = { version = "5", default-features = false, features = ["default-onig"] }
+syntect = { version = "5", default-features = false }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tiny_http = "0.12"
 toml = "1"

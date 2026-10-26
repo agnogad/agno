@@ -37,11 +37,14 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           # Fully static, so the download works on any distribution rather than
-          # only on glibc 2.34 and newer. Oniguruma is C, so the build needs
-          # musl-gcc as well as the target std.
+          # only on glibc 2.34 and newer. Two differences from the other
+          # targets: the pure-Rust regex engine, because Oniguruma serialises on
+          # a global lock that musl handles badly (0.21s on one thread, 0.72s on
+          # twelve - see the README), and musl-gcc for mimalloc, which is C.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             packages: musl-tools
+            flags: --no-default-features --features fancy
     steps:
       - uses: actions/checkout@v7
 
@@ -58,7 +61,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: cargo build --release
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.flags }}
 
       - name: stage the archive contents
         shell: bash

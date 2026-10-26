@@ -39,6 +39,12 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # --all-features turns on both regex engines, and syntect makes onig win
+      # that tie, so the fancy path would otherwise never be compiled. The musl
+      # release ships it, so it has to build here.
+      - name: cargo check (pure-Rust regex engine)
+        run: cargo check --all-targets --no-default-features --features fancy
+
       - name: cargo doc
         run: cargo doc --no-deps --all-features
         env:
