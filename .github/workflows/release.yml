@@ -36,8 +36,18 @@ jobs:
             target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          # Fully static, so the download works on any distribution rather than
+          # only on glibc 2.34 and newer. Oniguruma is C, so the build needs
+          # musl-gcc as well as the target std.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            packages: musl-tools
     steps:
       - uses: actions/checkout@v7
+
+      - name: apt packages
+        if: matrix.packages
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
