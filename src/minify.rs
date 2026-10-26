@@ -63,6 +63,7 @@ struct Tag<'a> {
     name: &'a str,
 }
 
+#[must_use]
 pub fn minify_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -100,7 +101,9 @@ pub fn minify_html(input: &str) -> String {
         }
 
         flush_space(&mut out, &mut pending_space, after_block);
-        let ch = input[index..].chars().next().expect("valid utf-8 boundary");
+        let Some(ch) = input.get(index..).and_then(|rest| rest.chars().next()) else {
+            break;
+        };
         out.push(ch);
         index += ch.len_utf8();
         after_block = false;
@@ -200,8 +203,7 @@ fn raw_element_end(input: &str, index: usize) -> Option<usize> {
         Some(start) => Some(
             input[start..]
                 .find('>')
-                .map(|end| start + end + 1)
-                .unwrap_or(input.len()),
+                .map_or(input.len(), |end| start + end + 1),
         ),
         None => Some(input.len()),
     }

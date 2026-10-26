@@ -1069,12 +1069,17 @@ fn manifest_of(root: &Path) -> PathBuf {
     let cache = root.join(".agno-cache");
     let mut found: Vec<PathBuf> = fs::read_dir(&cache)
         .unwrap()
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("outputs-") && name.ends_with(".json"))
+                .is_some_and(|name| {
+                    name.starts_with("outputs-")
+                        && name
+                            .rsplit_once('.')
+                            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("json"))
+                })
         })
         .collect();
     assert_eq!(found.len(), 1, "expected exactly one build manifest");

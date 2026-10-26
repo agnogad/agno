@@ -23,11 +23,21 @@ pub struct Report {
 }
 
 impl Report {
+    #[must_use]
     pub fn ok(&self) -> bool {
         self.errors.is_empty()
     }
 }
 
+/// Resolve every internal link, image, anchor and template reference against
+/// the files the build will produce.
+///
+/// # Errors
+///
+/// Fails when the site cannot be loaded: a missing root, unreadable content or
+/// invalid frontmatter. Broken links are findings in the returned [`Report`],
+/// not errors — the caller decides what to do with them.
+#[allow(clippy::too_many_lines)]
 pub fn check(root: &Path, drafts: Drafts) -> Result<Report> {
     let cfg = Config::load(root)?;
     cfg.validate()?;
@@ -230,9 +240,8 @@ fn heading_ids(body: &str) -> HashSet<String> {
 fn raw_ids(body: &str) -> Vec<String> {
     let mut ids = Vec::new();
     for event in Parser::new_ext(body, markdown::options()) {
-        let html = match event {
-            Event::Html(html) | Event::InlineHtml(html) => html,
-            _ => continue,
+        let (Event::Html(html) | Event::InlineHtml(html)) = event else {
+            continue;
         };
         for (index, _) in html.match_indices("id=") {
             let rest = &html[index + 3..];
@@ -250,6 +259,7 @@ fn raw_ids(body: &str) -> Vec<String> {
 
 /// Turn a link into the `output_rel` key of the file it should hit, or `None`
 /// when the link is external, an in-page anchor, or otherwise not checkable.
+#[must_use]
 pub fn resolve_link(from_url: &str, target: &str) -> Option<String> {
     let target = target.trim();
     if target.is_empty() || target.starts_with('#') || target.starts_with("//") {
@@ -274,10 +284,7 @@ pub fn resolve_link(from_url: &str, target: &str) -> Option<String> {
     let joined = if path.starts_with('/') {
         path
     } else {
-        let base = from_url
-            .rsplit_once('/')
-            .map(|(head, _)| head)
-            .unwrap_or("");
+        let base = from_url.rsplit_once('/').map_or("", |(head, _)| head);
         format!("{base}/{path}")
     };
     for segment in joined.split('/') {
@@ -319,19 +326,19 @@ fn extract_links(body: &str) -> Vec<(usize, String)> {
         .collect();
     let mut links = Vec::new();
     for (event, range) in Parser::new_ext(body, markdown::options()).into_offset_iter() {
-        let target = match event {
-            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => dest_url,
-            _ => continue,
+        let Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) = event else {
+            continue;
         };
-        if target.is_empty() {
+        if dest_url.is_empty() {
             continue;
         }
         let line = line_starts.partition_point(|&start| start <= range.start);
-        links.push((line, target.to_string()));
+        links.push((line, dest_url.to_string()));
     }
     links
 }
 
+#[must_use]
 pub fn render(report: &Report) -> String {
     let mut out = String::new();
     for warning in &report.warnings {

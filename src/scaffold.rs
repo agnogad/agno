@@ -74,6 +74,12 @@ impl From<bool> for Overwrite {
     }
 }
 
+/// Write the starter site into `path`.
+///
+/// # Errors
+///
+/// Fails when `path` is not empty and `overwrite` is [`Overwrite::Refuse`], or
+/// when a file cannot be written.
 pub fn create(path: &Path, overwrite: Overwrite) -> Result<()> {
     if path.exists() {
         let is_empty = fs::read_dir(path)?.next().is_none();

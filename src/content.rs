@@ -1,7 +1,7 @@
 use crate::config::Config;
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::{Rfc2822, Rfc3339};
@@ -110,6 +110,7 @@ pub struct Content {
 impl Content {
     /// The taxonomies that get an overview page (`/tags/`, `/categories/`),
     /// in a stable order: kind, title, and the terms themselves.
+    #[must_use]
     pub fn taxonomies(&self) -> Vec<(&'static str, &'static str, &[Listing])> {
         let mut out: Vec<(&'static str, &'static str, &[Listing])> = Vec::new();
         if !self.tags.is_empty() {
@@ -130,6 +131,7 @@ pub struct Asset {
 }
 
 impl Page {
+    #[must_use]
     pub fn rss_date(&self) -> String {
         self.date
             .and_then(|d| d.format(&Rfc2822).ok())
@@ -139,6 +141,7 @@ impl Page {
     /// Description used in feeds, cards and meta tags. `summary` is the
     /// effective summary: either the frontmatter value or the text agno
     /// extracted from the rendered first paragraph.
+    #[must_use]
     pub fn plain_description<'a>(&'a self, summary: &'a str) -> &'a str {
         if self.description.is_empty() {
             summary
@@ -149,6 +152,7 @@ impl Page {
 }
 
 impl Listing {
+    #[must_use]
     pub fn empty(key: &str, title: &str, url: &str) -> Self {
         Self {
             key: key.to_string(),
@@ -161,7 +165,7 @@ impl Listing {
             paginate_by: None,
             sort_by: SortBy::Date,
             template: None,
-            extra: Value::Object(Default::default()),
+            extra: Value::Object(Map::default()),
         }
     }
 }
@@ -179,6 +183,7 @@ pub enum Drafts {
 
 impl Drafts {
     /// True when drafts belong in the output.
+    #[must_use]
     pub fn includes(self) -> bool {
         matches!(self, Self::Include)
     }
@@ -190,6 +195,12 @@ impl From<bool> for Drafts {
     }
 }
 
+/// Walk `content/` and turn it into pages, sections and assets.
+///
+/// # Errors
+///
+/// Fails on an unreadable file, invalid frontmatter, a duplicate output URL, an
+/// unparseable `date` or `updated`, or an unknown `sort_by`.
 pub fn load(cfg: &Config, drafts: Drafts) -> Result<Content> {
     let include_drafts = drafts.includes();
     let root = cfg.content();
@@ -369,7 +380,7 @@ fn nearest_bundle<'a>(
 fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<(Page, SortBy)> {
     let Some(path) = index_paths.get("") else {
         let mut page = empty_page(cfg.title.clone(), "/".into());
-        page.description = cfg.description.clone();
+        page.description.clone_from(&cfg.description);
         return Ok((page, SortBy::Date));
     };
     let src =
@@ -381,7 +392,7 @@ fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<(Pa
         field_str(&fm, "title").unwrap_or_else(|| cfg.title.clone()),
         "/".into(),
     );
-    page.source = path.clone();
+    page.source.clone_from(path);
     page.description = field_str(&fm, "description").unwrap_or_else(|| cfg.description.clone());
     page.summary = field_str(&fm, "summary").unwrap_or_default();
     page.template = field_str(&fm, "template");
@@ -440,6 +451,12 @@ fn load_listing(index_paths: &HashMap<String, PathBuf>, key: &str, url: &str) ->
     })
 }
 
+/// Build one page from its frontmatter and body.
+///
+/// Long by nature: it is a flat field-by-field mapping from frontmatter to
+/// `Page`, and every attempt to split it only moved the field list into a
+/// second struct that nothing else used.
+#[allow(clippy::too_many_lines)]
 fn load_page(
     root: &Path,
     path: &Path,
@@ -458,8 +475,7 @@ fn load_page(
 
     let rel = path
         .strip_prefix(root)
-        .map(rel_string)
-        .unwrap_or_else(|_| rel_string(path));
+        .map_or_else(|_| rel_string(path), rel_string);
     let rel_no_ext = match rel.rsplit_once('.') {
         Some((head, _)) => head.to_string(),
         None => rel.clone(),
@@ -484,7 +500,7 @@ fn load_page(
     let reading_minutes = if word_count == 0 {
         0
     } else {
-        word_count.div_ceil(200) as u32
+        u32::try_from(word_count.div_ceil(200)).unwrap_or(u32::MAX)
     };
 
     let default_slug = if is_bundle_index {
@@ -520,10 +536,7 @@ fn load_page(
             format!("/{}/", segments.join("/"))
         }
     } else {
-        let parent = rel_no_ext
-            .rsplit_once('/')
-            .map(|(head, _)| head)
-            .unwrap_or("");
+        let parent = rel_no_ext.rsplit_once('/').map_or("", |(head, _)| head);
         let mut segments: Vec<String> = parent
             .split('/')
             .filter(|segment| !segment.is_empty())
@@ -546,12 +559,9 @@ fn load_page(
     // A bundle's page lives at `/dir/`, so its section is the bundle's parent
     // directory; a regular page belongs to the directory it sits in.
     let section_source = if is_bundle_index {
-        parent.rsplit_once('/').map(|(head, _)| head).unwrap_or("")
+        parent.rsplit_once('/').map_or("", |(head, _)| head)
     } else {
-        rel_no_ext
-            .rsplit_once('/')
-            .map(|(head, _)| head)
-            .unwrap_or("")
+        rel_no_ext.rsplit_once('/').map_or("", |(head, _)| head)
     };
     let section = (!section_source.is_empty()).then(|| section_source.to_string());
 
@@ -578,7 +588,7 @@ fn load_page(
         updated_text,
         updated_display,
         reading_minutes,
-        words: word_count as u32,
+        words: u32::try_from(word_count).unwrap_or(u32::MAX),
         draft,
         weight: field_i64(&fm, "weight").unwrap_or(0),
         description,
@@ -638,7 +648,7 @@ fn empty_page(title: String, url: String) -> Page {
         categories: Vec::new(),
         aliases: Vec::new(),
         template: None,
-        extra: Value::Object(Default::default()),
+        extra: Value::Object(Map::default()),
         body_line: 0,
         body: String::new(),
         content_key: 0,
@@ -696,6 +706,7 @@ fn body_start_line(src: &str, body: &str) -> usize {
     1 + src[..offset].bytes().filter(|byte| *byte == b'\n').count()
 }
 
+#[must_use]
 pub fn rel_string(path: &Path) -> String {
     let mut out = String::with_capacity(path.as_os_str().len() + 8);
     for component in path.components() {
@@ -707,6 +718,16 @@ pub fn rel_string(path: &Path) -> String {
     out
 }
 
+/// Split a file into its frontmatter map and the body that follows.
+///
+/// A leading BOM is ignored. Frontmatter is either `+++` (TOML) or `---`
+/// (YAML) on the first line, closed by the same delimiter.
+///
+/// # Errors
+///
+/// Fails when the frontmatter does not parse, or when it parses to something
+/// other than a mapping — a plain `---` fenced paragraph is content, not
+/// empty frontmatter, and dropping it silently lost text.
 pub fn split_frontmatter(src: &str) -> Result<(Value, &str)> {
     let src = src.strip_prefix('\u{feff}').unwrap_or(src);
 
@@ -746,7 +767,7 @@ pub fn split_frontmatter(src: &str) -> Result<(Value, &str)> {
                 // (`---\n---`) is still fine: there is nothing to lose.
                 let value = match value {
                     Value::Object(_) => value,
-                    Value::Null => Value::Object(Default::default()),
+                    Value::Null => Value::Object(Map::default()),
                     other => bail!(
                         "frontmatter must be a mapping of keys to values, found {}",
                         json_kind(&other)
@@ -756,7 +777,7 @@ pub fn split_frontmatter(src: &str) -> Result<(Value, &str)> {
             }
         }
     }
-    Ok((Value::Object(Default::default()), src))
+    Ok((Value::Object(Map::default()), src))
 }
 
 /// Human name for a frontmatter value's shape, used in error messages.
@@ -775,9 +796,7 @@ fn toml_to_json(value: toml::Value) -> Value {
     match value {
         toml::Value::String(s) => Value::String(s),
         toml::Value::Integer(i) => Value::Number(i.into()),
-        toml::Value::Float(f) => serde_json::Number::from_f64(f)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
+        toml::Value::Float(f) => serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number),
         toml::Value::Boolean(b) => Value::Bool(b),
         toml::Value::Datetime(dt) => Value::String(dt.to_string()),
         toml::Value::Array(items) => Value::Array(items.into_iter().map(toml_to_json).collect()),
@@ -813,7 +832,7 @@ fn field_bool(fm: &Value, key: &str) -> Option<bool> {
 
 fn field_usize(fm: &Value, key: &str) -> Option<usize> {
     match field(fm, key)? {
-        Value::Number(n) => n.as_u64().map(|n| n as usize),
+        Value::Number(n) => usize::try_from(n.as_u64()?).ok(),
         Value::String(s) => s.trim().parse().ok(),
         _ => None,
     }
@@ -841,7 +860,7 @@ fn field_string_list(fm: &Value, key: &str) -> Vec<String> {
     match field(fm, key) {
         Some(Value::Array(items)) => items
             .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
             .collect(),
         Some(Value::String(s)) => vec![s.clone()],
         _ => Vec::new(),
@@ -873,6 +892,7 @@ fn ymd(date: OffsetDateTime) -> String {
         .unwrap_or_default()
 }
 
+#[must_use]
 pub fn format_date_display(date: OffsetDateTime, language: &str) -> String {
     let month = date.month() as u8;
     if language.to_ascii_lowercase().starts_with("tr") {
@@ -928,6 +948,7 @@ fn field_date(fm: &Value, key: &str, path: &Path) -> Result<Option<OffsetDateTim
     }
 }
 
+#[must_use]
 pub fn parse_date(input: &str) -> Option<OffsetDateTime> {
     let input = input.trim();
     if let Ok(dt) = OffsetDateTime::parse(input, &Rfc3339) {
@@ -1022,6 +1043,7 @@ fn section_title(key: &str) -> String {
     humanize(key.rsplit('/').next().unwrap_or(key))
 }
 
+#[must_use]
 pub fn humanize(input: &str) -> String {
     let spaced = input.replace(['-', '_'], " ");
     let mut chars = spaced.chars();
@@ -1031,19 +1053,18 @@ pub fn humanize(input: &str) -> String {
     }
 }
 
+#[must_use]
 pub fn slugify(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         let mapped = match ch {
             'ç' | 'Ç' => 'c',
             'ğ' | 'Ğ' => 'g',
-            'ı' | 'I' | 'İ' => 'i',
+            'ı' | 'I' | 'İ' | 'î' | 'Î' => 'i',
             'ö' | 'Ö' => 'o',
             'ş' | 'Ş' => 's',
-            'ü' | 'Ü' => 'u',
+            'ü' | 'Ü' | 'û' | 'Û' => 'u',
             'â' | 'Â' => 'a',
-            'î' | 'Î' => 'i',
-            'û' | 'Û' => 'u',
             _ => ch,
         };
         if mapped.is_alphanumeric() {

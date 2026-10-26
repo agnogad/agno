@@ -15,6 +15,7 @@ const MAGIC: &[u8; 8] = b"AGNOFP02";
 
 /// Stable 64-bit FNV-1a. Deliberately not `DefaultHasher`: fingerprints must
 /// survive toolchain upgrades, otherwise every Rust update costs a full build.
+#[must_use]
 pub fn fingerprint(seed: u64, bytes: &[u8]) -> u64 {
     let mut hash = seed ^ 0xcbf2_9ce4_8422_2325;
     for byte in bytes {
@@ -24,6 +25,7 @@ pub fn fingerprint(seed: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
+#[must_use]
 pub fn combine(values: &[u64]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
     for value in values {
@@ -50,6 +52,7 @@ pub struct Fingerprints {
 }
 
 impl Fingerprints {
+    #[must_use]
     pub fn load(root: &Path, header: u64) -> Self {
         let empty = Self {
             header,
@@ -65,6 +68,7 @@ impl Fingerprints {
     }
 
     /// The stored summary for `url`, but only when the page source is unchanged.
+    #[must_use]
     pub fn summary(&self, url: &str, key: u64) -> Option<&str> {
         self.entries
             .get(url)
@@ -72,14 +76,22 @@ impl Fingerprints {
             .map(|entry| entry.summary.as_str())
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Write the fingerprint file, replacing the previous one in one rename.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the cache directory cannot be created, the file cannot be
+    /// written or renamed, or a stored string is over the 4 GiB field limit.
     pub fn save<'a>(
         &self,
         root: &Path,

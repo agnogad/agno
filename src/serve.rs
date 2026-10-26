@@ -10,8 +10,15 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tiny_http::{Header, Request, Response, Server};
 
-const LIVE_SCRIPT: &str = r#"<script>(()=>{let v=null;setInterval(async()=>{try{const t=await (await fetch('/__agno/live',{cache:'no-store'})).text();if(v===null)v=t;else if(v!==t)location.reload()}catch(e){}},400)})();</script>"#;
+const LIVE_SCRIPT: &str = r"<script>(()=>{let v=null;setInterval(async()=>{try{const t=await (await fetch('/__agno/live',{cache:'no-store'})).text();if(v===null)v=t;else if(v!==t)location.reload()}catch(e){}},400)})();</script>";
 
+/// Build the site, serve it on `port`, and rebuild on every change under
+/// `root`.
+///
+/// # Errors
+///
+/// Fails when the first build fails, the port cannot be bound, or the
+/// filesystem watcher cannot be created.
 pub fn dev(root: &Path, port: u16, drafts: Drafts) -> Result<()> {
     // Watch paths come back relative to the directory handed to `watch`, so a
     // canonical root keeps them comparable with the output directory.
@@ -110,14 +117,15 @@ fn is_ignored(path: &Path, root: &Path, ignored: &[PathBuf]) -> bool {
     if ignored.iter().any(|dir| path.starts_with(dir)) {
         return true;
     }
-    path.strip_prefix(root)
-        .map(|rel| {
-            rel.components()
-                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
-        })
-        .unwrap_or(false)
+    path.strip_prefix(root).is_ok_and(|rel| {
+        rel.components()
+            .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
+    })
 }
 
+// The three values are moved into the thread that runs this loop, so taking
+// them by reference would need a lifetime the spawn cannot provide.
+#[allow(clippy::needless_pass_by_value)]
 fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
     while let Ok(request) = server.recv() {
         let url = request.url().to_string();
@@ -175,8 +183,7 @@ fn serve_loop(server: Arc<Server>, dist: PathBuf, version: Arc<AtomicU64>) {
             None => {
                 let not_found = dist.join("404.html");
                 let body = std::fs::read_to_string(&not_found)
-                    .map(|html| inject(&html))
-                    .unwrap_or_else(|_| "<h1>404</h1>".to_string());
+                    .map_or_else(|_| "<h1>404</h1>".to_string(), |html| inject(&html));
                 respond(request, 404, "text/html; charset=utf-8", body);
             }
         }

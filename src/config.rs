@@ -53,6 +53,12 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Read `agno.toml` from `root`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `root` is not a directory, `agno.toml` cannot be read or
+    /// parsed, or a field has the wrong type.
     pub fn load(root: &Path) -> Result<Self> {
         // Without this, `agno build -r typo` creates the directory and an empty
         // site inside it instead of reporting the mistake.
@@ -79,30 +85,40 @@ impl Config {
         self.root.join(p)
     }
 
+    #[must_use]
     pub fn content(&self) -> PathBuf {
         self.path(&self.content_dir)
     }
 
+    #[must_use]
     pub fn templates(&self) -> PathBuf {
         self.path(&self.templates_dir)
     }
 
+    #[must_use]
     pub fn static_dir(&self) -> PathBuf {
         self.path(&self.static_dir)
     }
 
+    #[must_use]
     pub fn output(&self) -> PathBuf {
         self.path(&self.output_dir)
     }
 
     /// Reject output paths that could delete the site or another input directory.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `base_url` is not an absolute http(s) URL, or when
+    /// `output_dir` is the site root, escapes it, is a symlink, or overlaps
+    /// `content_dir`, `templates_dir` or `static_dir`.
     pub fn validate(&self) -> Result<()> {
         // Canonical links, the sitemap and the feed all concatenate this with
         // a page path, so a bare host name silently produces relative URLs in
         // every one of them.
-        if !self.base_url.is_empty()
-            && !(self.base_url.starts_with("http://") || self.base_url.starts_with("https://"))
-        {
+        let absolute =
+            self.base_url.starts_with("http://") || self.base_url.starts_with("https://");
+        if !self.base_url.is_empty() && !absolute {
             bail!(
                 "base_url must be an absolute http(s) URL, found \"{}\"",
                 self.base_url
@@ -151,6 +167,7 @@ impl Config {
         Ok(())
     }
 
+    #[must_use]
     pub fn absolute(&self, url: &str) -> String {
         format!("{}{}", self.base_url, url)
     }

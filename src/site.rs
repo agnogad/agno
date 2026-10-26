@@ -10,8 +10,9 @@ use minijinja::value::Serde;
 use minijinja::{Template, Value};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as Json;
+use serde_json::{Map, Value as Json};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -239,7 +240,7 @@ impl<'a> PageIndex<'a> {
     }
 
     fn section(&self, key: &str) -> &[&'a Page] {
-        self.sections.get(key).map(Vec::as_slice).unwrap_or(&[])
+        self.sections.get(key).map_or(&[], Vec::as_slice)
     }
 
     /// The page before and after `url` in its section, if any.
@@ -248,11 +249,11 @@ impl<'a> PageIndex<'a> {
     }
 
     fn tag(&self, key: &str) -> &[&'a Page] {
-        self.tags.get(key).map(Vec::as_slice).unwrap_or(&[])
+        self.tags.get(key).map_or(&[], Vec::as_slice)
     }
 
     fn category(&self, key: &str) -> &[&'a Page] {
-        self.categories.get(key).map(Vec::as_slice).unwrap_or(&[])
+        self.categories.get(key).map_or(&[], Vec::as_slice)
     }
 
     /// Pages carrying one term, whichever taxonomy `kind` names.
@@ -302,7 +303,7 @@ fn sort_pages(pages: &mut [&Page], sort_by: SortBy) {
             )
         }),
         SortBy::Title => {
-            pages.sort_by_cached_key(|page| (page.title.to_lowercase(), page.url.clone()))
+            pages.sort_by_cached_key(|page| (page.title.to_lowercase(), page.url.clone()));
         }
     }
 }
@@ -313,6 +314,14 @@ struct Manifest {
     files: Vec<String>,
 }
 
+/// Render the site at `root` into its output directory.
+///
+/// # Errors
+///
+/// Fails when the config is invalid, content cannot be read, a template is
+/// missing or fails to render, two outputs claim the same URL, or the output
+/// tree cannot be written.
+#[allow(clippy::too_many_lines)]
 pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let started = Instant::now();
     // Anything in the output directory written at or after this instant came
@@ -604,6 +613,12 @@ fn section_page_count(section: &Listing, count: usize) -> usize {
     split_size(section, count).map_or(1, |size| count.div_ceil(size))
 }
 
+/// One list per section, per taxonomy term, and the home page.
+///
+/// Long because it is three near-identical builders in a row; they share the
+/// `ListSpec` shape but not the page selection, and splitting them out only
+/// moved the borrows around.
+#[allow(clippy::too_many_lines)]
 fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<'a>> {
     let mut lists: Vec<ListSpec<'a>> = Vec::new();
     let mut home_pages: Vec<&Page> = content.pages.iter().collect();
@@ -690,7 +705,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
             description: "",
             body: "",
             content: Arc::new(OnceLock::new()),
-            extra: Json::Object(Default::default()),
+            extra: Json::Object(Map::default()),
             pages: Vec::new(),
             paginator: None,
             terms: terms
@@ -712,7 +727,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
             description: "",
             body: "",
             content: Arc::new(OnceLock::new()),
-            extra: Json::Object(Default::default()),
+            extra: Json::Object(Map::default()),
             pages: index.tag(&tag.key).to_vec(),
             paginator: None,
             terms: Vec::new(),
@@ -727,7 +742,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
             description: "",
             body: "",
             content: Arc::new(OnceLock::new()),
-            extra: Json::Object(Default::default()),
+            extra: Json::Object(Map::default()),
             pages: index.category(&category.key).to_vec(),
             paginator: None,
             terms: Vec::new(),
@@ -741,7 +756,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
         description: "",
         body: "",
         content: Arc::new(OnceLock::new()),
-        extra: Json::Object(Default::default()),
+        extra: Json::Object(Map::default()),
         pages: Vec::new(),
         paginator: None,
         terms: Vec::new(),
@@ -1007,6 +1022,7 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 
+#[must_use]
 pub fn output_rel(url: &str) -> String {
     // Built straight into one buffer: this runs a handful of times per page per
     // build, and a `Vec` of segments plus a `join` doubled the allocations.
@@ -1031,6 +1047,12 @@ pub fn output_rel(url: &str) -> String {
     out
 }
 
+/// Check that no two outputs claim the same URL before anything is written.
+///
+/// # Errors
+///
+/// Fails when two pages, an alias and a page, or a static file and a page
+/// resolve to the same path.
 pub fn validate_outputs(cfg: &Config, content: &Content, static_paths: &[String]) -> Result<()> {
     validate_urls(cfg, content, static_paths)
 }
@@ -1366,15 +1388,13 @@ fn neighbor(page: Option<&Page>) -> Option<NeighborView<'_>> {
 fn page_key(page: &Page, prev: Option<&Page>, next: Option<&Page>) -> u64 {
     let mut hash = page.content_key;
     for neighbor in [prev, next] {
-        let (url, title, date_display) = neighbor
-            .map(|page| {
-                (
-                    page.url.as_str(),
-                    page.title.as_str(),
-                    page.date_display.as_str(),
-                )
-            })
-            .unwrap_or(("", "", ""));
+        let (url, title, date_display) = neighbor.map_or(("", "", ""), |page| {
+            (
+                page.url.as_str(),
+                page.title.as_str(),
+                page.date_display.as_str(),
+            )
+        });
         hash = cache::fingerprint(hash, url.as_bytes());
         hash = cache::fingerprint(hash, title.as_bytes());
         hash = cache::fingerprint(hash, date_display.as_bytes());
@@ -1437,7 +1457,8 @@ fn rss(cfg: &Config, pages: &[Page], summaries: &HashMap<&str, &str>) -> String 
         };
         let pub_date = page.rss_date();
         let summary = summaries.get(page.url.as_str()).copied().unwrap_or("");
-        items.push_str(&format!(
+        let _ = write!(
+            items,
             "<item><title>{}</title><link>{link}</link><guid isPermaLink=\"true\">{link}</guid>{}<description>{}</description></item>",
             escape_html(&page.title),
             if pub_date.is_empty() {
@@ -1446,7 +1467,7 @@ fn rss(cfg: &Config, pages: &[Page], summaries: &HashMap<&str, &str>) -> String 
                 format!("<pubDate>{pub_date}</pubDate>")
             },
             escape_html(describe(page, summary)),
-        ));
+        );
     }
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\"><channel><title>{}</title><link>{}/</link><description>{}</description><language>{}</language>{items}</channel></rss>\n",
@@ -1565,6 +1586,11 @@ fn push_url_escaped(out: &mut String, url: &str) {
 /// Both paths come from the validated config, so this cannot be aimed at an
 /// arbitrary directory. `agno clean` goes through here rather than deleting a
 /// path it computed itself.
+///
+/// # Errors
+///
+/// Fails when the config is invalid, or when a file in the output tree cannot
+/// be removed; the error names the path that survived.
 pub fn clean(root: &Path) -> Result<PathBuf> {
     let cfg = Config::load(root)?;
     cfg.validate()?;
@@ -1602,9 +1628,7 @@ fn remove_all(path: &Path) -> std::io::Result<()> {
         };
         let is_dir = match entry.file_type() {
             Ok(kind) => kind.is_dir(),
-            Err(_) => fs::symlink_metadata(entry.path())
-                .map(|meta| meta.is_dir())
-                .unwrap_or(false),
+            Err(_) => fs::symlink_metadata(entry.path()).is_ok_and(|meta| meta.is_dir()),
         };
         entries.push((entry.path(), is_dir));
     }

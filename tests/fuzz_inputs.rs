@@ -22,7 +22,9 @@ impl Rng {
     }
 
     fn below(&mut self, limit: usize) -> usize {
-        (self.next() % limit as u64) as usize
+        // `limit` is a small constant at every call site, so both conversions
+        // are exact.
+        usize::try_from(self.next() % u64::try_from(limit).unwrap()).unwrap()
     }
 }
 

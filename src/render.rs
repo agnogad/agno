@@ -11,6 +11,12 @@ pub struct Templates {
 }
 
 impl Templates {
+    /// Load the embedded templates plus any file in `dir`, which shadows a
+    /// built-in of the same name.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a template in `dir` cannot be read or does not parse.
     pub fn load(dir: &Path) -> Result<Self> {
         let mut env = Environment::new();
         // Templates are loaded once per build, so minijinja's per-render
@@ -53,17 +59,28 @@ impl Templates {
         names
             .iter()
             .find(|name| self.has(name))
-            .map(|name| name.to_string())
+            .map(std::string::ToString::to_string)
     }
 
     /// Resolve a template once so callers can render it many times without
     /// paying for a name lookup (and its lock) on every page.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no template of that name exists.
     pub fn get(&self, name: &str) -> Result<Template<'_, '_>> {
         self.env
             .get_template(name)
             .with_context(|| format!("template {name} not found"))
     }
 
+    /// Render a template by name with `context` as its root.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the template is missing, or when it raises while rendering:
+    /// a filter error, a missing `{% include %}`, or an undefined value the
+    /// template dereferences.
     pub fn render(&self, name: &str, context: Value) -> Result<String> {
         Ok(self.get(name)?.render(context)?)
     }
@@ -75,13 +92,12 @@ fn write_html_escaped(out: &mut Output, value: &Value) -> Result<(), Error> {
     // A string can be escaped straight into the output; anything else is
     // formatted first, which costs an allocation but is rare.
     let mut owned;
-    let text = match value.as_str() {
-        Some(text) => text,
-        None => {
-            owned = String::new();
-            write!(&mut owned, "{value}").map_err(write_error)?;
-            &owned
-        }
+    let text = if let Some(text) = value.as_str() {
+        text
+    } else {
+        owned = String::new();
+        write!(&mut owned, "{value}").map_err(write_error)?;
+        &owned
     };
     if !text
         .as_bytes()

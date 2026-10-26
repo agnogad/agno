@@ -53,6 +53,7 @@ pub struct Rendered {
 }
 
 impl Rendered {
+    #[must_use]
     pub fn anchors(&self) -> &[String] {
         &self.anchors
     }
@@ -60,6 +61,7 @@ impl Rendered {
 
 /// The Markdown extensions `render` enables. Shared with `agno check` so link
 /// discovery parses exactly what the renderer does.
+#[must_use]
 pub fn options() -> Options {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
@@ -333,6 +335,7 @@ fn sanitize_lang(lang: &str) -> String {
         .collect()
 }
 
+#[must_use]
 pub fn escape_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     push_escaped(&mut out, input);
