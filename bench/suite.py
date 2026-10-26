@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Detailed benchmark matrix for agno vs Hugo vs Astro.
+"""Detailed benchmark matrix for agno vs Hugo vs Astro vs Zola.
 
 Cold builds across corpus sizes and content profiles, single-edit rebuilds,
 peak RSS, startup latency, a tiny site, a 10k-page scaling check, and setup
@@ -25,7 +25,16 @@ import run as base  # noqa: E402
 PROFILES = ["plain", "code", "heavy"]
 SIZES = [100, 1000, 3000]
 RUNS = {100: 7, 1000: 5, 3000: 3}
-GENERATORS = ["agno", "hugo", "astro"]
+GENERATORS = ["agno", "hugo", "astro", "zola"]
+LABELS = {"agno": "agno", "hugo": "Hugo", "astro": "Astro", "zola": "Zola"}
+# Astro is far too slow at 10k pages to be worth the wall clock.
+SCALE_GENERATORS = ["agno", "hugo", "zola"]
+# Astro's rebuild deletes the whole output tree before rendering; on a
+# compressed Btrfs volume that deletion dominates the run (36 s against a 4.8 s
+# cold build at 1,000 posts), so the number measures the filesystem instead of
+# the generator. Rebuilds are measured for the three generators that keep or
+# rewrite their output.
+REBUILD_GENERATORS = ["agno", "hugo", "zola"]
 TINY_RUNS = 10
 SCALE_COUNT = 10000
 SCALE_RUNS = 2
@@ -85,7 +94,11 @@ def html_count(path: Path) -> int:
 
 
 def setup_all(count, profile):
-    sites = {"agno": base.setup_agno(count, profile), "hugo": base.setup_hugo(count, profile)}
+    sites = {
+        "agno": base.setup_agno(count, profile),
+        "hugo": base.setup_hugo(count, profile),
+        "zola": base.setup_zola(count, profile),
+    }
     if os.environ.get("SKIP_ASTRO") != "1":
         sites["astro"] = base.setup_astro(count, profile)
     return sites
@@ -95,7 +108,7 @@ def cold_builds(sites, count, profile):
     records = []
     for name, site in sites.items():
         cmd = base.command(name, site)
-        cwd = site if name == "astro" else None
+        cwd = base.cwd_for(name, site)
         dist = base.dist(name, site)
         shutil.rmtree(dist, ignore_errors=True)
         execute(cmd, cwd)  # warmup
@@ -124,8 +137,10 @@ def cold_builds(sites, count, profile):
 def rebuilds(sites, count, profile):
     records = []
     for name, site in sites.items():
+        if name not in REBUILD_GENERATORS:
+            continue
         cmd = base.command(name, site)
-        cwd = site if name == "astro" else None
+        cwd = base.cwd_for(name, site)
         dist = base.dist(name, site)
         if not dist.exists():
             execute(cmd, cwd)
@@ -156,7 +171,7 @@ def tiny_site(records):
     sites = setup_all(2, "code")
     for name, site in sites.items():
         cmd = base.command(name, site)
-        cwd = site if name == "astro" else None
+        cwd = base.cwd_for(name, site)
         dist = base.dist(name, site)
         shutil.rmtree(dist, ignore_errors=True)
         execute(cmd, cwd)
@@ -180,18 +195,19 @@ def tiny_site(records):
 
 def scale_test(records):
     sites = {
-        "agno": base.setup_agno(SCALE_COUNT, "code"),
-        "hugo": base.setup_hugo(SCALE_COUNT, "code"),
+        name: getattr(base, f"setup_{name}")(SCALE_COUNT, "code")
+        for name in SCALE_GENERATORS
     }
     for name, site in sites.items():
         cmd = base.command(name, site)
+        cwd = base.cwd_for(name, site)
         dist = base.dist(name, site)
         shutil.rmtree(dist, ignore_errors=True)
-        execute(cmd)
+        execute(cmd, cwd)
         samples = []
         for _ in range(SCALE_RUNS):
             shutil.rmtree(dist, ignore_errors=True)
-            samples.append(execute(cmd))
+            samples.append(execute(cmd, cwd))
         record = {
             "scenario": "scale",
             "profile": "code",
@@ -212,6 +228,7 @@ def startup(records):
         "agno": [str(base.AGNO), "--version"],
         "hugo": [str(base.HUGO), "version"],
         "astro": [str(astro_bin), "--version"],
+        "zola": [str(base.ZOLA), "--version"],
     }
     for name, cmd in commands.items():
         cwd = base.WORK / "astro" if name == "astro" else None
@@ -239,6 +256,28 @@ def fmt(value):
 
 def speedup(slow, fast):
     return f"{slow / fast:.1f}×" if fast else "-"
+
+
+def md(cells):
+    return "| " + " | ".join(cells) + " |"
+
+
+def value(record, key="median_ms"):
+    return fmt(record[key]) if record else "-"
+
+
+def versus(fast, slow):
+    if not (fast and slow):
+        return "-"
+    return speedup(slow["median_ms"], fast["median_ms"])
+
+
+def table_head(lead, generators, ratios):
+    cols = lead + [LABELS[g] for g in generators]
+    cols += [f"agno vs {LABELS[g]}" for g in ratios]
+    align = ["---:"] + ["---"] * (len(lead) - 1)
+    align += ["---:"] * (len(generators) + len(ratios))
+    return [md(cols), md(align)]
 
 
 def write_report(records):
@@ -272,75 +311,74 @@ def write_report(records):
     lines.append(f"- agno: {version_of([str(base.AGNO), '--version'])}")
     lines.append(f"- Hugo: {base.HUGO.name} ({version_of([str(base.HUGO), 'version'])})")
     lines.append(f"- Astro: {astro_version()}")
+    lines.append(f"- Zola: {zola_version()}")
     lines.append("")
 
     lines.append("## Cold build (median ms)\n")
-    lines.append("| Posts | Profile | agno | Hugo | Astro | agno vs Hugo | agno vs Astro |")
-    lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: |")
+    others = [g for g in GENERATORS if g != "agno"]
+    lines += table_head(["Posts", "Profile"], GENERATORS, others)
     for profile in PROFILES:
         for count in SIZES:
             cells = [row("cold", profile, count, g) for g in GENERATORS]
-            if not all(cells):
+            if not cells[0]:
                 continue
-            a, h, s = cells
-            lines.append(
-                f"| {count} | {profile} | {fmt(a['median_ms'])} | {fmt(h['median_ms'])} | "
-                f"{fmt(s['median_ms'])} | {speedup(h['median_ms'], a['median_ms'])} | "
-                f"{speedup(s['median_ms'], a['median_ms'])} |"
-            )
+            cols = [str(count), profile] + [value(c) for c in cells]
+            cols += [versus(cells[0], row("cold", profile, count, g)) for g in others]
+            lines.append(md(cols))
     lines.append("")
 
     lines.append("## Single-edit rebuild (median ms)\n")
-    lines.append("| Posts | agno | Hugo | Astro | agno vs Hugo | agno vs Astro |")
-    lines.append("| ---: | ---: | ---: | ---: | ---: | ---: |")
+    rebuild_ratios = [g for g in REBUILD_GENERATORS if g != "agno"]
+    lines += table_head(["Posts"], REBUILD_GENERATORS, rebuild_ratios)
     for count in SIZES:
-        a = row("rebuild", "code", count, "agno")
-        h = row("rebuild", "code", count, "hugo")
-        s = row("rebuild", "code", count, "astro")
-        if not (a and h and s):
+        cells = [row("rebuild", "code", count, g) for g in REBUILD_GENERATORS]
+        if not cells[0]:
             continue
-        lines.append(
-            f"| {count} | {fmt(a['median_ms'])} | {fmt(h['median_ms'])} | {fmt(s['median_ms'])} | "
-            f"{speedup(h['median_ms'], a['median_ms'])} | {speedup(s['median_ms'], a['median_ms'])} |"
-        )
+        cols = [str(count)] + [value(c) for c in cells]
+        cols += [versus(cells[0], row("rebuild", "code", count, g)) for g in rebuild_ratios]
+        lines.append(md(cols))
     lines.append("")
+    lines.append(
+        "Astro is not measured here: its rebuild empties the output directory "
+        "before rendering, and that deletion dominates the run on this "
+        "filesystem (36 s against a 4.8 s cold build at 1,000 posts).\n"
+    )
 
     lines.append("## Peak RSS, cold builds (median MB)\n")
-    lines.append("| Posts | Profile | agno | Hugo | Astro |")
-    lines.append("| ---: | --- | ---: | ---: | ---: |")
+    lines += table_head(["Posts", "Profile"], GENERATORS, [])
     for profile in PROFILES:
         for count in SIZES:
             cells = [row("cold", profile, count, g) for g in GENERATORS]
-            if not all(cells):
+            if not cells[0]:
                 continue
             lines.append(
-                f"| {count} | {profile} | {fmt(cells[0]['rss_mb'])} | "
-                f"{fmt(cells[1]['rss_mb'])} | {fmt(cells[2]['rss_mb'])} |"
+                md([str(count), profile] + [value(c, "rss_mb") for c in cells])
             )
     lines.append("")
 
     tiny = [row("tiny", "code", 2, g) for g in GENERATORS]
-    if all(tiny):
+    if any(tiny):
         lines.append("## Tiny site (2 posts)\n")
         lines.append("| Generator | median ms | RSS MB |")
         lines.append("| --- | ---: | ---: |")
         for record in tiny:
-            lines.append(
-                f"| {record['generator']} | {fmt(record['median_ms'])} | {fmt(record['rss_mb'])} |"
-            )
+            if record:
+                lines.append(
+                    f"| {record['generator']} | {fmt(record['median_ms'])} | {fmt(record['rss_mb'])} |"
+                )
         lines.append("")
 
-    scale = [row("scale", "code", SCALE_COUNT, g) for g in ["agno", "hugo"]]
-    if all(scale):
-        a, h = scale
+    scale = [row("scale", "code", SCALE_COUNT, g) for g in SCALE_GENERATORS]
+    if any(scale):
         lines.append(f"## Scaling: {SCALE_COUNT} posts (median ms)\n")
         lines.append("| Generator | median ms | RSS MB | pages/s |")
         lines.append("| --- | ---: | ---: | ---: |")
         for record in scale:
-            lines.append(
-                f"| {record['generator']} | {fmt(record['median_ms'])} | "
-                f"{fmt(record['rss_mb'])} | {record['count'] / (record['median_ms'] / 1000):.0f} |"
-            )
+            if record:
+                lines.append(
+                    f"| {record['generator']} | {fmt(record['median_ms'])} | "
+                    f"{fmt(record['rss_mb'])} | {record['count'] / (record['median_ms'] / 1000):.0f} |"
+                )
         lines.append("")
 
     starts = [row("startup", "-", 0, g) for g in GENERATORS]
@@ -359,6 +397,8 @@ def write_report(records):
     lines.append(f"| agno binary | {base.AGNO.stat().st_size / 1_000_000:.1f} MB |")
     if base.HUGO.exists():
         lines.append(f"| Hugo binary | {base.HUGO.stat().st_size / 1_000_000:.1f} MB |")
+    if base.ZOLA.exists():
+        lines.append(f"| Zola binary | {base.ZOLA.stat().st_size / 1_000_000:.1f} MB |")
     node_modules = base.WORK / "astro" / "node_modules"
     if node_modules.exists():
         lines.append(f"| Astro node_modules | {dir_size(node_modules) / 1_000_000:.0f} MB |")
@@ -399,6 +439,12 @@ def astro_version():
         return json.loads(package.read_text())["version"]
     except Exception:
         return "unknown"
+
+
+def zola_version():
+    if not base.ZOLA.exists():
+        return "not installed"
+    return version_of([str(base.ZOLA), "--version"])
 
 
 def main():

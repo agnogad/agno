@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="{{ config.default_language }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ config.title }}{% endblock %}</title>
+  {% if page and page.description %}<meta name="description" content="{{ page.description }}">{% endif %}
+  <link rel="stylesheet" href="/style.css">
+  <link rel="alternate" type="application/atom+xml" title="{{ config.title }}" href="/atom.xml">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/">{{ config.title }}</a>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>© {{ now() | date(format="%Y") }} {{ config.title }}</footer>
+</body>
+</html>

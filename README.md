@@ -36,25 +36,28 @@ marketing pages.
 ## Why agno?
 
 - **Fast by default.** Cold builds are parallel from Markdown parsing to output
-  writes: 1,000 plain posts build in 65 ms, and 10,000 posts with code blocks
-  in about one second on the [benchmark machine](#benchmarks).
+  writes: 1,000 plain posts build in about 106 ms, and 10,000 posts with code
+  blocks in about 1.3 seconds on the [benchmark machine](#benchmarks).
 - **Incremental by default.** A build remembers what it rendered, so a rebuild
   only touches the pages whose source, templates or site context changed:
-  1,000 posts rebuild in ~23 ms, and at 10,000 posts a rebuild costs about a
+  1,000 posts rebuild in ~33 ms, and at 10,000 posts a rebuild costs about a
   twelfth of a full build.
 - **One static binary.** The release binary is 4.2 MB and has no runtime
   dependencies. No `node_modules`, no language runtime, no service to install.
 - **Small, understandable surface.** A focused feature set instead of a plugin
   ecosystem, a bundler, and a JavaScript toolchain.
-- **Batteries included.** Sections, pagination, tags, page bundles, drafts,
+- **Batteries included.** Sections, pagination, tags and categories with term
+  and overview pages, page bundles, drafts,
   aliases, RSS, sitemap, search index, `404.html`, a table of contents, syntax
   highlighting, a link checker, and a live-reloading dev server.
 - **Comfortable authoring.** TOML or YAML frontmatter, optional templates, and
   a working site from `agno new` in seconds.
 
-Benchmarked against Hugo and Astro on the same corpus, agno builds **3.9–12.8×
-faster than Hugo** and **16.7–185× faster than Astro** on cold builds. See
-[Benchmarks](#benchmarks) for numbers, methodology, and caveats.
+Benchmarked against Hugo, Zola, and Astro on the same corpus, agno builds
+**3.3–9.3× faster than Hugo**, **1.9–14× faster than Zola** (2–6× from 1,000
+posts up), and **12–161× faster than Astro** on cold builds, and 13–16× faster
+than Zola on rebuilds. See [Benchmarks](#benchmarks) for numbers, methodology,
+and caveats.
 
 ## Installation
 
@@ -196,7 +199,7 @@ Body in **Markdown**.
 | `description` | Meta description and list summary |
 | `summary` | Explicit summary, overriding the first paragraph |
 | `draft` | Excluded from builds unless `--drafts` is passed |
-| `tags`, `categories` | Taxonomy values; tags get their own pages |
+| `tags`, `categories` | Taxonomy values; each gets a term page and a taxonomy overview |
 | `template` | Template name for this page |
 | `slug` | Override the generated slug |
 | `url` | Override the generated URL |
@@ -229,6 +232,25 @@ Filenames can start with a date. `2024-05-01-hello.md` sets the date and derives
 the slug automatically. URL path segments are slugified, `slug` overrides the
 last segment, and tags that slugify to the same value share one tag page.
 
+## Taxonomies
+
+`tags` and `categories` are taxonomies: every distinct value gets a term page
+listing the pages that carry it, and each taxonomy gets an overview page listing
+its terms, like Hugo's `/tags/` and Zola's taxonomy pages.
+
+```text
+/tags/                     all tags, with counts
+/tags/rust/                pages tagged "Rust"
+/categories/               all categories
+/categories/engineering/   pages in "Engineering"
+```
+
+Terms are slugified and case-folded, so `Rust` and `rust` share `/tags/rust/`.
+Overview pages render with `taxonomy.html` (`page.terms[]` holds the terms);
+term pages use `category.html`, then `tag.html`, then `section.html`. All of
+them fall back to the embedded defaults, so nothing has to be added to a site
+for the pages to exist.
+
 ## Templates
 
 Templates use [MiniJinja](https://docs.rs/minijinja) and live in `templates/`.
@@ -239,11 +261,13 @@ back to them, so a site still builds without a `templates/` directory.
 | --- | --- |
 | `site.title`, `site.description`, `site.base_url`, `site.language`, `site.author`, `site.menu`, `site.year`, `site.post_count` | Site metadata |
 | `site.tags[].name`, `.url`, `.count`, `.latest_title`, `.latest_url` | Tags with post counts and the newest tagged post |
+| `site.categories[].name`, `.url`, `.count`, `.latest_title`, `.latest_url` | The same shape for categories |
 | `site.sections[].title`, `.url`, `.count` | Top-level sections, for building navigation |
 | `page.title`, `page.url`, `page.date`, `page.date_display`, `page.datetime`, `page.reading_minutes`, `page.description`, `page.content`, `page.tags`, `page.categories`, `page.slug`, `page.section`, `page.extra` | Current page or list page |
 | `page.updated`, `page.updated_display` | The `updated` frontmatter date, if set |
 | `page.words`, `page.toc`, `page.toc_html` | Word count, heading tree (`level`, `id`, `title`, `children`), and the same tree rendered as nested `<ul>` |
 | `page.paginator` | Pagination state on section pages: `current`, `total`, `page_size`, `item_count`, `prev_url`, `next_url`, `first_url`, `last_url`, `links[]` |
+| `page.terms[]` | Taxonomy overview pages only: `name`, `url`, `count` for each term |
 | `pages[].title`, `.url`, `.date`, `.date_display`, `.datetime`, `.reading_minutes`, `.summary`, `.tags`, `.section` | Page cards in list templates |
 
 `page.toc` is empty when a page has fewer than two headings. Every heading gets
@@ -251,8 +275,9 @@ a slugified `id`, so `#some-heading` links work out of the box; duplicate
 headings are disambiguated with a numeric suffix.
 
 The default templates are `base.html`, `page.html`, `section.html`,
-`index.html`, and `404.html`. Add `tag.html` to use a dedicated tag layout.
-Filters include `slugify`, `starts_with`, `safe`, and the MiniJinja built-ins.
+`index.html`, `taxonomy.html`, and `404.html`. Add `tag.html` or `category.html`
+to use a dedicated layout for those term pages. Filters include `slugify`,
+`starts_with`, `safe`, and the MiniJinja built-ins.
 
 ```html
 {% extends "base.html" %}
@@ -304,31 +329,64 @@ The output directory is removed before every timed run and process startup is
 included. `code` adds one syntax-highlighted code block per post; `heavy` adds
 three code blocks, a table, and a footnote.
 
-| Scenario | agno | Hugo | Astro |
-| --- | ---: | ---: | ---: |
-| 100 posts, plain | **12.9 ms** | 97.8 ms | 2,385 ms |
-| 1,000 posts, plain | **65.3 ms** | 320.9 ms | 3,596 ms |
-| 1,000 posts, code | **92.1 ms** | 396.3 ms | 3,530 ms |
-| 1,000 posts, heavy | **181.4 ms** | 2,071.3 ms | 5,715 ms |
-| 3,000 posts, heavy | **554.7 ms** | 7,120.9 ms | 9,273 ms |
-| 10,000 posts, code | **1,004 ms** | 4,067 ms | — |
+| Scenario | agno | Hugo | Zola | Astro |
+| --- | ---: | ---: | ---: | ---: |
+| 100 posts, plain | **22.9 ms** | 212.2 ms | 191.7 ms | 3,685 ms |
+| 1,000 posts, plain | **106.4 ms** | 501.3 ms | 250.7 ms | 5,546 ms |
+| 1,000 posts, code | **136.0 ms** | 516.3 ms | 437.8 ms | 4,787 ms |
+| 1,000 posts, heavy | **207.7 ms** | 1,892.6 ms | 1,080.0 ms | 5,407 ms |
+| 3,000 posts, heavy | **636.9 ms** | 5,757.0 ms | 2,248.4 ms | 7,425 ms |
+| 10,000 posts, code | **1,308 ms** | 4,006 ms | 3,236 ms | — |
 
-| Other situations | agno | Hugo | Astro |
-| --- | ---: | ---: | ---: |
-| Single-edit rebuild, 1,000 posts | **180 ms** | 545 ms | 3,724 ms |
-| 2-page site, cold build | **17 ms** | 95 ms | 2,825 ms |
-| CLI startup | **1.8 ms** | 58.1 ms | 133.2 ms |
-| Peak RSS, 1,000 posts/code | **21 MB** | 146 MB | 624 MB |
-| Peak RSS, 3,000 posts/heavy | **49 MB** | 540 MB | 701 MB |
-| Install footprint | **3.9 MB binary** | 62.6 MB binary | 121 MB `node_modules` |
+| Other situations | agno | Hugo | Zola | Astro |
+| --- | ---: | ---: | ---: | ---: |
+| Single-edit rebuild, 1,000 posts | **32.8 ms** | 691.4 ms | 485.7 ms | — |
+| 2-page site, cold build | **12.1 ms** | 102.5 ms | 113.5 ms | 2,497 ms |
+| CLI startup | **1.9 ms** | 79.1 ms | 13.4 ms | 114.7 ms |
+| Peak RSS, 1,000 posts/code | **21.7 MB** | 168.1 MB | 76.3 MB | 613.2 MB |
+| Peak RSS, 3,000 posts/heavy | **51.2 MB** | 558.8 MB | 170.7 MB | 688.3 MB |
+| Install footprint | **4.3 MB binary** | 95.1 MB binary | 50.8 MB binary | 121 MB `node_modules` |
 
-At 10,000 posts agno sustains about **9,955 pages/s**, compared with 2,459
-pages/s for Hugo. The full matrix, raw samples, and reproduction steps are in
-[`bench/REPORT.md`](bench/REPORT.md) and [`bench/README.md`](bench/README.md).
+At 10,000 posts agno sustains about **7,642 pages/s**, compared with 2,496
+pages/s for Hugo and 3,090 for Zola. The full matrix, raw samples, and
+reproduction steps are in [`bench/REPORT.md`](bench/REPORT.md) and
+[`bench/README.md`](bench/README.md).
 
-> **Report versions:** agno 0.1.0, Hugo 0.168.0, Astro 7.4.2. The current
-> release is 0.3.2; rerun [`bench/suite.py`](bench/suite.py) to measure your own
-> machine.
+Astro is missing from the rebuild row on purpose: its rebuild empties the output
+directory before rendering, and that deletion dominates the run on this
+filesystem (36 s against a 4.8 s cold build at 1,000 posts), so the number would
+measure the disk instead of the generator.
+
+> **Report versions:** agno 0.3.2, Hugo 0.168.0, Zola 0.23.6, Astro 7.4.2.
+> Rerun [`bench/suite.py`](bench/suite.py) to measure your own machine.
+
+### Zola
+
+Zola is the closest Rust neighbour, so it also gets a head-to-head run: the
+same corpus built twice, with equivalent templates, tag pages, a feed, a
+sitemap and syntax highlighting, and the two generators alternating inside every
+scenario so a load spike hits both. Medians of 7 runs on the machine above,
+agno 0.3.2 + this branch against Zola 0.23.6:
+
+| Posts | Profile | Cold build | | Rebuild | |
+| ---: | --- | ---: | --- | ---: | --- |
+| 1,000 | plain | **100 ms** / 233 ms | 2.3× | **21 ms** / 353 ms | 17× |
+| 1,000 | code | **124 ms** / 433 ms | 3.5× | **30 ms** / 546 ms | 18× |
+| 1,000 | heavy | **227 ms** / 1,285 ms | 5.7× | **32 ms** / 1,318 ms | 41× |
+| 3,000 | heavy | **608 ms** / 2,389 ms | 3.9× | **85 ms** / 2,764 ms | 32× |
+| 10,000 | code | **1,304 ms** / 3,405 ms | 2.6× | **187 ms** / 4,990 ms | 27× |
+
+Zola has no incremental mode: `zola build` deletes the output directory and
+renders everything, so its rebuild costs as much as a cold build. agno keeps
+fingerprints per page and rewrites only what changed. Peak RSS at 1,000
+posts/code is 21 MB against 76 MB, and the binary is 4.3 MB against 50.8 MB.
+
+Method, single-edit numbers, and caveats: [`bench/ZOLA.md`](bench/ZOLA.md).
+Reproduce with:
+
+```sh
+python3 bench/zola_compare.py --count 1000 --profile code --runs 5
+```
 
 ### Search index cost (agno 0.2.0)
 
@@ -387,6 +445,34 @@ python3 bench/incremental.py --count 10000 --runs 5
 The old `agno build --no-clean` path, which re-rendered every page but skipped
 deleting the output tree, is gone: incremental builds are now the default and
 `--clean` is the opt-in full rebuild.
+
+### Section landing pages
+
+A site with many sections — documentation, notes, a course — used to pay for
+every `_index.md` on every build: the Markdown body was parsed and highlighted
+while content was loaded, even when the listing was unchanged and would not be
+written. Section bodies are now rendered on demand, once per section, inside the
+parallel list phase.
+
+Corpus: 300 sections, each with a `_index.md` containing two code blocks and
+five pages (1,801 pages). Medians of 5 runs, alternating the 0.3.2 and branch
+binaries on the same corpus:
+
+| Scenario | 0.3.2 | branch | |
+| --- | ---: | ---: | --- |
+| Cold build (`--clean`) | 379 ms | **330 ms** | 1.2× faster |
+| No-op rebuild | 118 ms | **31 ms** | 3.8× faster |
+| Single-edit rebuild | 116 ms | **40 ms** | 2.9× faster |
+
+The cold build is mostly deleting and rewriting 1,800 files on Btrfs, which is
+why it gains less than the rebuilds: the Markdown work that moved out of the
+content phase is a smaller share of it. A blog-shaped corpus without section
+bodies is unaffected — 3,000 posts rebuild in 40 ms either way, because there is
+no section Markdown to skip.
+
+```sh
+python3 bench/sections.py --sections 300 --per-section 5 --runs 7
+```
 
 > **Fairness note:** the Astro fixture renders Markdown pages only and does not
 > include syntax highlighting, taxonomies, RSS, or a sitemap. Its timings are
@@ -450,7 +536,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The benchmark matrix compares agno with Hugo and Astro:
+The benchmark matrix compares agno with Hugo, Astro and Zola:
 
 ```sh
 python3 bench/suite.py

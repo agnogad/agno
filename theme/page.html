@@ -6,6 +6,7 @@
   <p class="meta">
     <time datetime="{{ page.datetime }}">{{ page.date }}</time>
     {% for tag in page.tags %} · <a href="/tags/{{ tag|slugify }}/">{{ tag }}</a>{% endfor %}
+    {% for category in page.categories %} · <a href="/categories/{{ category|slugify }}/">{{ category }}</a>{% endfor %}
     · {{ page.reading_minutes }} min read
   </p>
   {% endif %}

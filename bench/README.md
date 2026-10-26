@@ -1,10 +1,10 @@
 # Benchmark
 
-Compares agno, Hugo and Astro on the same generated Markdown corpus.
+Compares agno, Hugo, Astro and Zola on the same generated Markdown corpus.
 
 ```sh
 cargo build --release
-HUGO_BIN=/path/to/hugo python3 bench/suite.py
+HUGO_BIN=/path/to/hugo ZOLA_BIN=/path/to/zola python3 bench/suite.py
 ```
 
 `suite.py` runs the full matrix and writes `results.json` plus `REPORT.md`.
@@ -25,6 +25,33 @@ reports whole-build wall time, the `lists+feeds` phase that writes
 python3 bench/search_index.py --counts 1000 10000 --runs 9 --profile code
 ```
 
+## Section-heavy sites
+
+`sections.py` builds a documentation-shaped corpus — N sections, each with a
+`_index.md` that has two code blocks and M pages — and reports cold, no-op and
+single-edit builds. Section landing pages are Markdown that only has to be
+rendered when the listing is written, so this is the corpus that shows it.
+
+```sh
+python3 bench/sections.py --sections 300 --per-section 5 --runs 7
+```
+
+## Zola comparison
+
+Zola is part of the matrix above. `zola_compare.py` is the focused head-to-head:
+it builds the same corpus for both generators and reports cold, rebuild and
+single-edit times plus peak RSS and startup, alternating the two generators
+inside every scenario so a load spike hits both. Zola only reads TOML
+frontmatter, so the generator's YAML is converted on the way in; the Markdown
+bodies stay byte-identical.
+
+```sh
+python3 bench/zola_compare.py --count 1000 --profile code --runs 5
+```
+
+Set `ZOLA_BIN` if `zola` is not on `PATH`. Results and caveats:
+[`ZOLA.md`](ZOLA.md).
+
 ## Corpus
 
 `gen.py` writes N posts (YAML frontmatter, tags, deterministic prose) into each
@@ -38,30 +65,38 @@ project's content directory:
 
 ## Fixtures
 
-- `hugo/` and `astro/` are minimal projects with layouts equivalent to the
-  embedded agno theme: single page, list, home, 404, stylesheet.
-- `run.py` prepares all three sites under `work/` (gitignored). Astro
+- `hugo/`, `zola/` and `astro/` are minimal projects with layouts equivalent to
+  the embedded agno theme: single page, list, home, 404, stylesheet.
+- `run.py` prepares all four sites under `work/` (gitignored), recreating each
+  one from its fixture so no site inherits content from an earlier run. Astro
   dependencies are installed once with `npm install`.
-- agno highlights code with syntect/Oniguruma; Hugo uses Chroma. Both do real
-  syntax highlighting, so their timings include it.
+- Zola only reads TOML frontmatter, so `run.py` rewrites the generator's YAML
+  frontmatter as TOML for the Zola site. The Markdown bodies are byte-identical.
+- agno highlights code with syntect/Oniguruma; Hugo uses Chroma and Zola uses
+  Giallo. All three do real syntax highlighting, so their timings include it.
 - Astro's fixture renders Markdown pages only: no syntax highlighting,
-  taxonomies, RSS or sitemap. Hugo and agno do all of those here, so Astro's
-  timings are optimistic.
+  taxonomies, RSS or sitemap. Hugo, Zola and agno do all of those here, so
+  Astro's timings are optimistic.
 
 ## Scenarios
 
 - **Cold build:** output directory deleted before each timed run; a warmup run
   precedes the samples. Command lines are exactly what a user runs.
 - **Single-edit rebuild:** one post gets an extra paragraph, then the normal
-  build command runs with the previous output present.
+  build command runs with the previous output present. Zola has no incremental
+  mode, so this is a full rebuild for it. Astro is skipped here: its rebuild
+  empties the output directory first, and that deletion dominates the run on a
+  compressed filesystem (36 s against a 4.8 s cold build at 1,000 posts), so the
+  number would measure the disk rather than the generator.
 - **Tiny site:** two posts, to show fixed startup cost.
-- **Scaling:** 10,000 posts for agno and Hugo (Astro omitted for runtime).
-- **Startup:** `agno --version`, `hugo version`, `astro --version`.
+- **Scaling:** 10,000 posts for agno, Hugo and Zola (Astro omitted for runtime).
+- **Startup:** `agno --version`, `hugo version`, `astro --version`,
+  `zola --version`.
 - **RSS / footprint:** peak RSS via `wait4`, binary and `node_modules` size,
   generated output size.
 
 Runs: 7 (100 posts), 5 (1,000), 3 (3,000), 2 (10,000), 10 (tiny/startup).
 Medians are reported; raw samples are in `results.json`.
 
-Set `SKIP_ASTRO=1` to skip Astro, or `AGNO_BIN` / `HUGO_BIN` to point at other
-binaries.
+Set `SKIP_ASTRO=1` to skip Astro, or `AGNO_BIN` / `HUGO_BIN` / `ZOLA_BIN` to
+point at other binaries.
