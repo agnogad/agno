@@ -277,7 +277,15 @@ headings are disambiguated with a numeric suffix.
 The default templates are `base.html`, `page.html`, `section.html`,
 `index.html`, `taxonomy.html`, and `404.html`. Add `tag.html` or `category.html`
 to use a dedicated layout for those term pages. Filters include `slugify`,
-`starts_with`, `safe`, and the MiniJinja built-ins.
+`starts_with`, `url`, `safe`, and the MiniJinja built-ins.
+
+Autoescaping is on for HTML, which also escapes every `/` in a value into
+`&#x2f;`. Pipe URLs through `url` to escape only what could break out of an
+attribute, so `href="/blog/hello/"` stays readable:
+
+```html
+<a href="{{ page.url|url }}">{{ page.title }}</a>
+```
 
 ```html
 {% extends "base.html" %}

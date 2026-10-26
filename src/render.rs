@@ -19,6 +19,9 @@ impl Templates {
         env.add_filter("starts_with", |value: String, prefix: String| {
             value.starts_with(&prefix)
         });
+        env.add_filter("url", |value: String| {
+            Value::from_safe_string(escape_url(&value))
+        });
         for (name, source) in theme::TEMPLATES {
             if !dir.join(name).is_file() {
                 env.add_template_owned(*name, *source)
@@ -52,5 +55,47 @@ impl Templates {
 
     pub fn render(&self, name: &str, context: Value) -> Result<String> {
         Ok(self.get(name)?.render(context)?)
+    }
+}
+
+/// Escape a URL for use in an HTML attribute, leaving `/` alone.
+///
+/// The `Html` autoescape turns every `/` into `&#x2f;`, which browsers decode
+/// but which triples the size of a path like `/blog/hello/`. A URL only needs
+/// the characters that could end the attribute or start markup escaped, so the
+/// `url` filter does that and marks the result safe.
+fn escape_url(url: &str) -> String {
+    let mut out = String::with_capacity(url.len() + 8);
+    for ch in url.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_url;
+
+    #[test]
+    fn a_path_keeps_its_slashes() {
+        assert_eq!(escape_url("/blog/hello-world/"), "/blog/hello-world/");
+        assert_eq!(
+            escape_url("https://example.com/a/b"),
+            "https://example.com/a/b"
+        );
+    }
+
+    #[test]
+    fn query_ampersands_and_quotes_are_still_escaped() {
+        assert_eq!(escape_url("/s?q=a&b=1"), "/s?q=a&amp;b=1");
+        assert_eq!(escape_url("/a\"><script>"), "/a&quot;&gt;&lt;script&gt;");
+        assert_eq!(escape_url("/it's"), "/it&#x27;s");
     }
 }

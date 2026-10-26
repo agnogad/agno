@@ -7,13 +7,13 @@
   {% if page.description %}<meta name="description" content="{{ page.description }}">{% endif %}
   <link rel="stylesheet" href="/style.css">
   <link rel="alternate" type="application/rss+xml" title="{{ site.title }}" href="/rss.xml">
-  <link rel="canonical" href="{{ site.base_url }}{{ page.url }}">
+  <link rel="canonical" href="{{ site.base_url|url }}{{ page.url|url }}">
 </head>
 <body>
   <header class="site-header">
     <a class="brand" href="/">{{ site.title }}</a>
     <nav>
-      {% for item in site.menu %}<a href="{{ item.url }}">{{ item.title }}</a>{% endfor %}
+      {% for item in site.menu %}<a href="{{ item.url|url }}">{{ item.title }}</a>{% endfor %}
     </nav>
   </header>
   <main>
