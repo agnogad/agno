@@ -1,7 +1,11 @@
 name: ci
 
 on:
+  # Branches only: a `v*` tag runs release.yml, and running the whole matrix
+  # again for the same commit would just duplicate it.
   push:
+    branches:
+      - "**"
   pull_request:
   workflow_dispatch:
 
