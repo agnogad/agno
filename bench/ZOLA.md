@@ -9,7 +9,7 @@ This is the focused head-to-head. Zola is also part of the main matrix in
 [`REPORT.md`](REPORT.md), which adds the corpus profiles and the 10,000-post
 scale test.
 
-- agno 0.3.2 + the taxonomy/rebuild branch, release build
+- agno 0.3.2 (taxonomies + on-demand section rendering), release build
 - Zola 0.23.6, official `x86_64-unknown-linux-gnu` binary
 - Intel i5-13420H (12 threads), CachyOS, Linux 7.2.2, Btrfs (`compress=zstd`)
 - 7 runs per cell, medians; wall clock includes process startup

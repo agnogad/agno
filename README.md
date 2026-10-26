@@ -366,7 +366,7 @@ Zola is the closest Rust neighbour, so it also gets a head-to-head run: the
 same corpus built twice, with equivalent templates, tag pages, a feed, a
 sitemap and syntax highlighting, and the two generators alternating inside every
 scenario so a load spike hits both. Medians of 7 runs on the machine above,
-agno 0.3.2 + this branch against Zola 0.23.6:
+agno 0.3.2 against Zola 0.23.6:
 
 | Posts | Profile | Cold build | | Rebuild | |
 | ---: | --- | ---: | --- | ---: | --- |
