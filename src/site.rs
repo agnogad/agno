@@ -1,6 +1,6 @@
 use crate::cache;
 use crate::config::{Config, MenuItem};
-use crate::content::{self, Content, Listing, Page};
+use crate::content::{self, Content, Listing, Page, SortBy};
 use crate::markdown::{self, TocEntry, escape_html, push_escaped};
 use crate::render::Templates;
 use crate::theme;
@@ -89,6 +89,16 @@ struct PageView<'a> {
     extra: &'a Json,
     toc: &'a [TocEntry],
     toc_html: &'a str,
+    /// Previous and next page in the section's own order; `None` at the ends.
+    prev: Option<NeighborView<'a>>,
+    next: Option<NeighborView<'a>>,
+}
+
+#[derive(Serialize, Clone)]
+struct NeighborView<'a> {
+    title: &'a str,
+    url: &'a str,
+    date_display: &'a str,
 }
 
 #[derive(Serialize, Clone)]
@@ -183,20 +193,36 @@ fn page_url(section_url: &str, number: usize) -> String {
 
 struct PageIndex<'a> {
     sections: HashMap<&'a str, Vec<&'a Page>>,
+    /// Previous and next page of each page, in its section's own order.
+    links: HashMap<&'a str, (Option<&'a Page>, Option<&'a Page>)>,
     tags: HashMap<String, Vec<&'a Page>>,
     categories: HashMap<String, Vec<&'a Page>>,
 }
 
 impl<'a> PageIndex<'a> {
-    fn new(pages: &'a [Page]) -> Self {
-        let mut sections: HashMap<&str, Vec<&Page>> = HashMap::new();
+    fn new(pages: &'a [Page], sections: &'a [Listing]) -> Self {
+        let mut grouped: HashMap<&str, Vec<&Page>> = HashMap::new();
         for page in pages {
             if let Some(section) = page.section.as_deref() {
-                sections.entry(section).or_default().push(page);
+                grouped.entry(section).or_default().push(page);
+            }
+        }
+        let order: HashMap<&str, SortBy> = sections
+            .iter()
+            .map(|section| (section.key.as_str(), section.sort_by))
+            .collect();
+        let mut links: HashMap<&str, (Option<&Page>, Option<&Page>)> = HashMap::new();
+        for (key, group) in &mut grouped {
+            sort_section(group, order.get(*key).copied().unwrap_or_default());
+            for (position, page) in group.iter().enumerate() {
+                let prev = position.checked_sub(1).map(|i| group[i]);
+                let next = group.get(position + 1).copied();
+                links.insert(page.url.as_str(), (prev, next));
             }
         }
         Self {
-            sections,
+            sections: grouped,
+            links,
             tags: term_index(pages, |page| &page.tags),
             categories: term_index(pages, |page| &page.categories),
         }
@@ -204,6 +230,11 @@ impl<'a> PageIndex<'a> {
 
     fn section(&self, key: &str) -> &[&'a Page] {
         self.sections.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The page before and after `url` in its section, if any.
+    fn links(&self, url: &str) -> (Option<&'a Page>, Option<&'a Page>) {
+        self.links.get(url).copied().unwrap_or((None, None))
     }
 
     fn tag(&self, key: &str) -> &[&'a Page] {
@@ -245,6 +276,23 @@ fn term_index(
     index
 }
 
+/// Order one section's pages. `date` leaves the global newest-first order
+/// alone; the other two re-sort, and a stable sort keeps the date order as the
+/// tie-breaker for equal weights.
+fn sort_section(pages: &mut [&Page], sort_by: SortBy) {
+    match sort_by {
+        SortBy::Date => {}
+        SortBy::Weight => pages.sort_by_cached_key(|page| {
+            (
+                page.weight,
+                std::cmp::Reverse(page.date),
+                page.title.to_lowercase(),
+            )
+        }),
+        SortBy::Title => pages.sort_by_cached_key(|page| page.title.to_lowercase()),
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Manifest {
     output: String,
@@ -275,7 +323,20 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let has_static_style = static_paths.iter().any(|path| path == "style.css");
 
     let templates = Templates::load(&cfg.templates())?;
-    let index = PageIndex::new(&content.pages);
+    let index = PageIndex::new(&content.pages, &content.sections);
+    // A page's neighbours are part of what it renders, so they join its cache
+    // key: adding or reordering a page re-renders the two pages around it.
+    let links: Vec<(Option<&Page>, Option<&Page>)> = content
+        .pages
+        .iter()
+        .map(|page| index.links(&page.url))
+        .collect();
+    let page_keys: Vec<u64> = content
+        .pages
+        .iter()
+        .zip(&links)
+        .map(|(page, (prev, next))| page_key(page, *prev, *next))
+        .collect();
     let site = site_view(&cfg, &content, &index);
     // Serialize the site once: it is identical for every page, and rebuilding
     // it per page used to cost O(pages x tags) on taxonomy-heavy sites.
@@ -310,7 +371,9 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let fresh: Vec<Option<String>> = content
         .pages
         .par_iter()
-        .map(|page| {
+        .zip(links.par_iter())
+        .zip(page_keys.par_iter())
+        .map(|((page, (prev, next)), key)| {
             render_page(
                 &cfg,
                 &templates,
@@ -319,6 +382,9 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
                 &default_name,
                 &default_page,
                 page,
+                *prev,
+                *next,
+                *key,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -336,10 +402,11 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         .pages
         .iter()
         .zip(&fresh)
-        .map(|(page, fresh)| {
+        .zip(&page_keys)
+        .map(|((page, fresh), key)| {
             let summary = fresh
                 .as_deref()
-                .or_else(|| fingerprints.summary(&page.url, page.content_key))
+                .or_else(|| fingerprints.summary(&page.url, *key))
                 .unwrap_or(&page.summary);
             (page.url.as_str(), summary)
         })
@@ -420,13 +487,18 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         || list_rendered.iter().any(|rendered| *rendered)
         || fingerprints.len() != expected_entries
     {
-        let pages = content.pages.iter().zip(fresh.iter()).map(|(page, fresh)| {
-            let summary = fresh
-                .as_deref()
-                .or_else(|| fingerprints.summary(&page.url, page.content_key))
-                .unwrap_or(&page.summary);
-            (page.url.as_str(), page.content_key, summary)
-        });
+        let pages = content
+            .pages
+            .iter()
+            .zip(fresh.iter())
+            .zip(page_keys.iter())
+            .map(|((page, fresh), key)| {
+                let summary = fresh
+                    .as_deref()
+                    .or_else(|| fingerprints.summary(&page.url, *key))
+                    .unwrap_or(&page.summary);
+                (page.url.as_str(), *key, summary)
+            });
         let lists = lists
             .iter()
             .zip(&list_keys)
@@ -678,13 +750,14 @@ fn render_page(
     default_name: &str,
     default_template: &Template<'_, '_>,
     page: &Page,
+    prev: Option<&Page>,
+    next: Option<&Page>,
+    key: u64,
 ) -> Result<Option<String>> {
     // The rendered file in `dist/` doubles as the cache: when the page source,
-    // the templates and the site-wide context are unchanged, skip Markdown,
-    // highlighting, templating and the write entirely.
-    if fingerprints.summary(&page.url, page.content_key).is_some()
-        && output_path(cfg, &page.url).is_file()
-    {
+    // the templates, the site-wide context and the page's neighbours are
+    // unchanged, skip Markdown, highlighting, templating and the write entirely.
+    if fingerprints.summary(&page.url, key).is_some() && output_path(cfg, &page.url).is_file() {
         return Ok(None);
     }
 
@@ -700,6 +773,8 @@ fn render_page(
         &summary,
         &rendered.toc,
         &rendered.toc_html,
+        prev,
+        next,
     );
     let cards: Vec<CardView> = Vec::new();
     let ctx = context! {
@@ -1198,6 +1273,8 @@ fn page_view<'a>(
     summary: &'a str,
     toc: &'a [TocEntry],
     toc_html: &'a str,
+    prev: Option<&'a Page>,
+    next: Option<&'a Page>,
 ) -> PageView<'a> {
     PageView {
         title: &page.title,
@@ -1222,7 +1299,31 @@ fn page_view<'a>(
         extra: &page.extra,
         toc,
         toc_html,
+        prev: neighbor(prev),
+        next: neighbor(next),
     }
+}
+
+fn neighbor(page: Option<&Page>) -> Option<NeighborView<'_>> {
+    page.map(|page| NeighborView {
+        title: &page.title,
+        url: &page.url,
+        date_display: &page.date_display,
+    })
+}
+
+/// Cache key of a rendered page: its source fingerprint plus the identity of
+/// the two pages its navigation points at.
+fn page_key(page: &Page, prev: Option<&Page>, next: Option<&Page>) -> u64 {
+    let mut hash = page.content_key;
+    for neighbor in [prev, next] {
+        let (url, title) = neighbor
+            .map(|page| (page.url.as_str(), page.title.as_str()))
+            .unwrap_or(("", ""));
+        hash = cache::fingerprint(hash, url.as_bytes());
+        hash = cache::fingerprint(hash, title.as_bytes());
+    }
+    hash
 }
 
 fn describe<'a>(page: &'a Page, summary: &'a str) -> &'a str {

@@ -18,4 +18,10 @@
   {% endif %}
   <div class="content">{{ page.content|safe }}</div>
 </article>
+{% if page.prev or page.next %}
+<nav class="page-nav">
+  {% if page.prev %}<a rel="prev" href="{{ page.prev.url|safe }}">← {{ page.prev.title }}</a>{% else %}<span></span>{% endif %}
+  {% if page.next %}<a rel="next" href="{{ page.next.url|safe }}">{{ page.next.title }} →</a>{% else %}<span></span>{% endif %}
+</nav>
+{% endif %}
 {% endblock %}

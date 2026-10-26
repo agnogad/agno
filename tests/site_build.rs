@@ -1212,3 +1212,172 @@ fn check_reports_source_lines_and_reference_links() {
     assert!(errors.contains("lines.md:6"), "{errors}");
     assert!(errors.contains("lines.md:8"), "{errors}");
 }
+
+/// A docs-shaped section: three pages, no dates, explicit weights.
+fn docs_fixture(name: &str, sort_by: &str) -> PathBuf {
+    let root = fixture(name);
+    fs::create_dir_all(root.join("content/docs")).unwrap();
+    fs::write(
+        root.join("content/docs/_index.md"),
+        format!("+++\ntitle = \"Docs\"\nsort_by = \"{sort_by}\"\n+++\n"),
+    )
+    .unwrap();
+    for (slug, title, weight) in [
+        ("usage", "Usage", 30),
+        ("intro", "Intro", 10),
+        ("install", "Install", 20),
+    ] {
+        fs::write(
+            root.join(format!("content/docs/{slug}.md")),
+            format!("+++\ntitle = \"{title}\"\nweight = {weight}\n+++\n\nBody of {title}.\n"),
+        )
+        .unwrap();
+    }
+    root
+}
+
+fn build_once(root: &Path, clean: bool) {
+    build(
+        root,
+        &BuildOptions {
+            drafts: false,
+            clean,
+            minify: false,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn weight_orders_a_section_and_links_neighbours() {
+    let root = docs_fixture("docs-weight", "weight");
+    build_once(&root, true);
+
+    let listing = text(&root.join("dist/docs/index.html"));
+    let intro = listing.find(">Intro<").expect("intro card");
+    let install = listing.find(">Install<").expect("install card");
+    let usage = listing.find(">Usage<").expect("usage card");
+    assert!(intro < install && install < usage, "{listing}");
+
+    let intro_page = text(&root.join("dist/docs/intro/index.html"));
+    assert!(!intro_page.contains("rel=\"prev\""), "{intro_page}");
+    assert!(intro_page.contains("rel=\"next\" href=\"/docs/install/\""));
+
+    let install_page = text(&root.join("dist/docs/install/index.html"));
+    assert!(install_page.contains("rel=\"prev\" href=\"/docs/intro/\""));
+    assert!(install_page.contains("rel=\"next\" href=\"/docs/usage/\""));
+
+    let usage_page = text(&root.join("dist/docs/usage/index.html"));
+    assert!(usage_page.contains("rel=\"prev\" href=\"/docs/install/\""));
+    assert!(!usage_page.contains("rel=\"next\""), "{usage_page}");
+}
+
+#[test]
+fn sort_by_title_orders_a_section_alphabetically() {
+    let root = docs_fixture("docs-title", "title");
+    build_once(&root, true);
+
+    let listing = text(&root.join("dist/docs/index.html"));
+    let install = listing.find(">Install<").expect("install card");
+    let intro = listing.find(">Intro<").expect("intro card");
+    let usage = listing.find(">Usage<").expect("usage card");
+    assert!(install < intro && intro < usage, "{listing}");
+
+    let intro_page = text(&root.join("dist/docs/intro/index.html"));
+    assert!(intro_page.contains("rel=\"prev\" href=\"/docs/install/\""));
+    assert!(intro_page.contains("rel=\"next\" href=\"/docs/usage/\""));
+}
+
+#[test]
+fn pagination_follows_the_section_order() {
+    let root = docs_fixture("docs-paginated-weight", "weight");
+    fs::write(
+        root.join("content/docs/_index.md"),
+        "+++\ntitle = \"Docs\"\nsort_by = \"weight\"\npaginate_by = 1\n+++\n",
+    )
+    .unwrap();
+    build_once(&root, true);
+
+    let first = text(&root.join("dist/docs/index.html"));
+    assert!(first.contains(">Intro<"), "{first}");
+    let second = text(&root.join("dist/docs/page/2/index.html"));
+    assert!(second.contains(">Install<"), "{second}");
+    let third = text(&root.join("dist/docs/page/3/index.html"));
+    assert!(third.contains(">Usage<"), "{third}");
+}
+
+#[test]
+fn a_section_sorts_by_date_unless_told_otherwise() {
+    let root = fixture("docs-default-order");
+    fs::write(
+        root.join("content/blog/second.md"),
+        "+++\ntitle = \"Second\"\ndate = 2024-06-02\n+++\n\nLater.\n",
+    )
+    .unwrap();
+    build_once(&root, true);
+
+    let listing = text(&root.join("dist/blog/index.html"));
+    let hello = listing.find(">Hello<").expect("hello card");
+    let second = listing.find(">Second<").expect("second card");
+    assert!(second < hello, "{listing}");
+    assert!(
+        text(&root.join("dist/blog/hello/index.html"))
+            .contains("rel=\"prev\" href=\"/blog/second/\""),
+        "the older post points back at the newer one"
+    );
+}
+
+#[test]
+fn an_unknown_sort_by_is_rejected() {
+    let root = docs_fixture("docs-bad-sort", "popular");
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("invalid sort_by \"popular\""), "{err}");
+    assert!(err.contains("date"), "{err}");
+}
+
+#[test]
+fn inserting_a_page_rerenders_its_neighbours() {
+    let root = fixture("docs-insert");
+    fs::create_dir_all(root.join("content/docs")).unwrap();
+    fs::write(
+        root.join("content/docs/_index.md"),
+        "+++\ntitle = \"Docs\"\nsort_by = \"weight\"\n+++\n",
+    )
+    .unwrap();
+    for (slug, title, weight) in [("a", "Alpha", 10), ("c", "Gamma", 30)] {
+        fs::write(
+            root.join(format!("content/docs/{slug}.md")),
+            format!("+++\ntitle = \"{title}\"\nweight = {weight}\n+++\n\nBody.\n"),
+        )
+        .unwrap();
+    }
+    build_once(&root, true);
+    let last = text(&root.join("dist/docs/c/index.html"));
+    assert!(last.contains("rel=\"prev\" href=\"/docs/a/\""));
+
+    // A new page in the middle changes what both existing pages link to, even
+    // though neither of them was edited.
+    fs::write(
+        root.join("content/docs/b.md"),
+        "+++\ntitle = \"Beta\"\nweight = 20\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    build_once(&root, false);
+
+    let first = text(&root.join("dist/docs/a/index.html"));
+    assert!(first.contains("rel=\"next\" href=\"/docs/b/\""), "{first}");
+    let middle = text(&root.join("dist/docs/b/index.html"));
+    assert!(middle.contains("rel=\"prev\" href=\"/docs/a/\""));
+    assert!(middle.contains("rel=\"next\" href=\"/docs/c/\""));
+    let last = text(&root.join("dist/docs/c/index.html"));
+    assert!(last.contains("rel=\"prev\" href=\"/docs/b/\""), "{last}");
+}

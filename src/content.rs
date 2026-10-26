@@ -25,6 +25,8 @@ pub struct Page {
     pub reading_minutes: u32,
     pub words: u32,
     pub draft: bool,
+    /// Sort position inside a section ordered with `sort_by = "weight"`.
+    pub weight: i64,
     pub description: String,
     pub summary: String,
     pub tags: Vec<String>,
@@ -44,6 +46,28 @@ pub struct Page {
     pub section: Option<String>,
 }
 
+/// How a section orders the pages it lists. `date` keeps the historical
+/// behaviour (newest first); `weight` is the documentation ordering, ascending,
+/// with pages that share a weight falling back to date and then title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    #[default]
+    Date,
+    Weight,
+    Title,
+}
+
+impl SortBy {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "date" => Some(Self::Date),
+            "weight" => Some(Self::Weight),
+            "title" => Some(Self::Title),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Listing {
     pub key: String,
@@ -61,6 +85,9 @@ pub struct Listing {
     pub source: PathBuf,
     /// Split this section's pages into `/section/page/N/` chunks of this size.
     pub paginate_by: Option<usize>,
+    /// How this section orders its pages; `date` unless `_index.md` says
+    /// otherwise.
+    pub sort_by: SortBy,
     /// Remaining frontmatter, exposed to list templates as `page.extra`.
     pub extra: Value,
 }
@@ -128,6 +155,7 @@ impl Listing {
             body_line: 0,
             source: PathBuf::new(),
             paginate_by: None,
+            sort_by: SortBy::Date,
             extra: Value::Object(Default::default()),
         }
     }
@@ -330,6 +358,15 @@ fn load_listing(index_paths: &HashMap<String, PathBuf>, key: &str, url: &str) ->
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let (fm, body) = split_frontmatter(&src)
         .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
+    let sort_by = match field_str(&fm, "sort_by") {
+        Some(value) => SortBy::parse(&value).with_context(|| {
+            format!(
+                "invalid sort_by \"{value}\" in {}: expected \"date\", \"weight\" or \"title\"",
+                path.display()
+            )
+        })?,
+        None => SortBy::Date,
+    };
     Ok(Listing {
         key: key.to_string(),
         title: field_str(&fm, "title").unwrap_or_else(|| section_title(key)),
@@ -339,6 +376,7 @@ fn load_listing(index_paths: &HashMap<String, PathBuf>, key: &str, url: &str) ->
         body: body.to_string(),
         source: path.clone(),
         paginate_by: field_usize(&fm, "paginate_by").filter(|size| *size > 0),
+        sort_by,
         extra: fm,
     })
 }
@@ -494,6 +532,7 @@ fn load_page(
         reading_minutes,
         words: word_count as u32,
         draft,
+        weight: field_i64(&fm, "weight").unwrap_or(0),
         description,
         summary,
         tags: field_string_list(&fm, "tags"),
@@ -524,6 +563,7 @@ fn empty_page(title: String, url: String) -> Page {
         reading_minutes: 0,
         words: 0,
         draft: false,
+        weight: 0,
         description: String::new(),
         summary: String::new(),
         tags: Vec::new(),
@@ -651,6 +691,14 @@ fn field_bool(fm: &Value, key: &str) -> Option<bool> {
 fn field_usize(fm: &Value, key: &str) -> Option<usize> {
     match field(fm, key)? {
         Value::Number(n) => n.as_u64().map(|n| n as usize),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn field_i64(fm: &Value, key: &str) -> Option<i64> {
+    match field(fm, key)? {
+        Value::Number(n) => n.as_i64(),
         Value::String(s) => s.trim().parse().ok(),
         _ => None,
     }
