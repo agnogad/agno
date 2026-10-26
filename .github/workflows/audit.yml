@@ -1,0 +1,33 @@
+name: audit
+
+# A vulnerability is published against a version, not against a commit, so a
+# weekly run catches one that landed after the last push. Pushes to main still
+# check the graph that is actually being shipped.
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # `cargo audit` fails on a vulnerability and only warns on an
+      # unmaintained crate, which is the split that matters here: agno pulls
+      # three unmaintained crates through syntect and serde_yaml_ng, and none
+      # of them has a CVE against it.
+      - run: cargo audit

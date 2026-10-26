@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      # Patch bumps of the whole graph arrive as one PR. A minor bump can raise
+      # the MSRV, which is a decision rather than a chore, so those stay
+      # separate and the msrv job in ci.yml gets the final word.
+      patch:
+        update-types: ["patch"]
+      minor:
+        update-types: ["minor"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
