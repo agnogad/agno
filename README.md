@@ -223,11 +223,14 @@ sort_by = "weight"
 ```
 
 Page 1 stays at `/blog/`; the rest live at `/blog/page/2/`, `/blog/page/3/`,
-and so on, and are linked through `page.paginator` in `section.html`.
+and so on, and are linked through `page.paginator` in `section.html`. The home
+page (`content/_index.md`) takes `sort_by` too; pagination is a section
+feature.
 
 ### Ordering and navigation
 
-`sort_by` takes one of three values:
+`sort_by` takes one of three values, whether it sits in a section's `_index.md`
+or in the home page's:
 
 | Value | Order |
 | --- | --- |

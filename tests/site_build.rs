@@ -1328,6 +1328,33 @@ fn a_section_sorts_by_date_unless_told_otherwise() {
 }
 
 #[test]
+fn the_home_page_honours_sort_by() {
+    let root = fixture("home-sort");
+    fs::write(
+        root.join("content/_index.md"),
+        "+++\ntitle = \"Home\"\nsort_by = \"weight\"\n+++\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/heavy.md"),
+        "+++\ntitle = \"Heavy\"\nweight = 2\ndate = 2024-07-01\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/light.md"),
+        "+++\ntitle = \"Light\"\nweight = 1\ndate = 2024-01-01\n+++\n\nBody.\n",
+    )
+    .unwrap();
+    build_once(&root, true);
+
+    // Date order would put Heavy first; the home page asked for weight.
+    let home = text(&root.join("dist/index.html"));
+    let light = home.find(">Light<").expect("light card");
+    let heavy = home.find(">Heavy<").expect("heavy card");
+    assert!(light < heavy, "{home}");
+}
+
+#[test]
 fn an_unknown_sort_by_is_rejected() {
     let root = docs_fixture("docs-bad-sort", "popular");
     let err = build(
@@ -1342,6 +1369,37 @@ fn an_unknown_sort_by_is_rejected() {
     .to_string();
     assert!(err.contains("invalid sort_by \"popular\""), "{err}");
     assert!(err.contains("date"), "{err}");
+}
+
+#[test]
+fn changing_a_neighbours_date_rerenders_the_page() {
+    let root = fixture("neighbour-date");
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/page.html"),
+        "{{ page.title }}|prev={{ page.prev.date_display }}",
+    )
+    .unwrap();
+    fs::write(
+        root.join("content/blog/second.md"),
+        "+++\ntitle = \"Second\"\ndate = 2024-06-02\n+++\n\nLater.\n",
+    )
+    .unwrap();
+    build_once(&root, true);
+    let before = text(&root.join("dist/blog/hello/index.html"));
+    assert!(before.contains("June 2, 2024"), "{before}");
+
+    // Only the neighbour changes; hello itself is untouched, but what it
+    // renders about its neighbour is not.
+    fs::write(
+        root.join("content/blog/second.md"),
+        "+++\ntitle = \"Second\"\ndate = 2024-06-03\n+++\n\nLater.\n",
+    )
+    .unwrap();
+    build_once(&root, false);
+
+    let after = text(&root.join("dist/blog/hello/index.html"));
+    assert!(after.contains("June 3, 2024"), "{after}");
 }
 
 #[test]

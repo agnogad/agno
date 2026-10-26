@@ -94,6 +94,8 @@ pub struct Listing {
 
 pub struct Content {
     pub home: Page,
+    /// Ordering of the home page's list, from `content/_index.md`.
+    pub home_sort_by: SortBy,
     pub pages: Vec<Page>,
     pub sections: Vec<Listing>,
     pub tags: Vec<Listing>,
@@ -205,7 +207,7 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
     // Sort keys are computed once per page instead of once per comparison.
     pages.sort_by_cached_key(|page| (std::cmp::Reverse(page.date), page.title.to_lowercase()));
 
-    let home = load_home(cfg, &index_paths)?;
+    let (home, home_sort_by) = load_home(cfg, &index_paths)?;
 
     // Every directory that directly contains content is a section, at any
     // depth. Pages report their parent directory as `section`, and an
@@ -235,6 +237,7 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
 
     Ok(Content {
         home,
+        home_sort_by,
         pages,
         sections,
         tags,
@@ -327,16 +330,17 @@ fn nearest_bundle<'a>(
     }
 }
 
-fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<Page> {
+fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<(Page, SortBy)> {
     let Some(path) = index_paths.get("") else {
         let mut page = empty_page(cfg.title.clone(), "/".into());
         page.description = cfg.description.clone();
-        return Ok(page);
+        return Ok((page, SortBy::Date));
     };
     let src =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let (fm, body) = split_frontmatter(&src)
         .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
+    let sort_by = parse_sort_by(&fm, path)?;
     let mut page = empty_page(
         field_str(&fm, "title").unwrap_or_else(|| cfg.title.clone()),
         "/".into(),
@@ -347,7 +351,19 @@ fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<Pag
     page.extra = fm;
     page.body_line = body_start_line(&src, body);
     page.body = body.to_string();
-    Ok(page)
+    Ok((page, sort_by))
+}
+
+fn parse_sort_by(fm: &Value, path: &Path) -> Result<SortBy> {
+    match field_str(fm, "sort_by") {
+        Some(value) => SortBy::parse(&value).with_context(|| {
+            format!(
+                "invalid sort_by \"{value}\" in {}: expected \"date\", \"weight\" or \"title\"",
+                path.display()
+            )
+        }),
+        None => Ok(SortBy::Date),
+    }
 }
 
 fn load_listing(index_paths: &HashMap<String, PathBuf>, key: &str, url: &str) -> Result<Listing> {
@@ -358,15 +374,7 @@ fn load_listing(index_paths: &HashMap<String, PathBuf>, key: &str, url: &str) ->
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let (fm, body) = split_frontmatter(&src)
         .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
-    let sort_by = match field_str(&fm, "sort_by") {
-        Some(value) => SortBy::parse(&value).with_context(|| {
-            format!(
-                "invalid sort_by \"{value}\" in {}: expected \"date\", \"weight\" or \"title\"",
-                path.display()
-            )
-        })?,
-        None => SortBy::Date,
-    };
+    let sort_by = parse_sort_by(&fm, path)?;
     Ok(Listing {
         key: key.to_string(),
         title: field_str(&fm, "title").unwrap_or_else(|| section_title(key)),

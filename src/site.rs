@@ -213,7 +213,7 @@ impl<'a> PageIndex<'a> {
             .collect();
         let mut links: HashMap<&str, (Option<&Page>, Option<&Page>)> = HashMap::new();
         for (key, group) in &mut grouped {
-            sort_section(group, order.get(*key).copied().unwrap_or_default());
+            sort_pages(group, order.get(*key).copied().unwrap_or_default());
             for (position, page) in group.iter().enumerate() {
                 let prev = position.checked_sub(1).map(|i| group[i]);
                 let next = group.get(position + 1).copied();
@@ -279,7 +279,7 @@ fn term_index(
 /// Order one section's pages. `date` leaves the global newest-first order
 /// alone; the other two re-sort, and a stable sort keeps the date order as the
 /// tie-breaker for equal weights.
-fn sort_section(pages: &mut [&Page], sort_by: SortBy) {
+fn sort_pages(pages: &mut [&Page], sort_by: SortBy) {
     match sort_by {
         SortBy::Date => {}
         SortBy::Weight => pages.sort_by_cached_key(|page| {
@@ -579,6 +579,8 @@ fn section_page_count(section: &Listing, count: usize) -> usize {
 
 fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<'a>> {
     let mut lists: Vec<ListSpec<'a>> = Vec::new();
+    let mut home_pages: Vec<&Page> = content.pages.iter().collect();
+    sort_pages(&mut home_pages, content.home_sort_by);
     lists.push(ListSpec {
         title: &content.home.title,
         url: "/".to_string(),
@@ -586,7 +588,7 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
         body: &content.home.body,
         content: Arc::new(OnceLock::new()),
         extra: content.home.extra.clone(),
-        pages: content.pages.iter().collect(),
+        pages: home_pages,
         paginator: None,
         terms: Vec::new(),
         candidates: &["index.html"],
@@ -1312,16 +1314,24 @@ fn neighbor(page: Option<&Page>) -> Option<NeighborView<'_>> {
     })
 }
 
-/// Cache key of a rendered page: its source fingerprint plus the identity of
-/// the two pages its navigation points at.
+/// Cache key of a rendered page: its source fingerprint plus every field the
+/// navigation exposes about the two pages it points at. A neighbour that is
+/// added, removed, renamed or re-dated therefore re-renders this page.
 fn page_key(page: &Page, prev: Option<&Page>, next: Option<&Page>) -> u64 {
     let mut hash = page.content_key;
     for neighbor in [prev, next] {
-        let (url, title) = neighbor
-            .map(|page| (page.url.as_str(), page.title.as_str()))
-            .unwrap_or(("", ""));
+        let (url, title, date_display) = neighbor
+            .map(|page| {
+                (
+                    page.url.as_str(),
+                    page.title.as_str(),
+                    page.date_display.as_str(),
+                )
+            })
+            .unwrap_or(("", "", ""));
         hash = cache::fingerprint(hash, url.as_bytes());
         hash = cache::fingerprint(hash, title.as_bytes());
+        hash = cache::fingerprint(hash, date_display.as_bytes());
     }
     hash
 }
