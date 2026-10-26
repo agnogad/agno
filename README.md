@@ -46,7 +46,8 @@ marketing pages.
   dependencies. No `node_modules`, no language runtime, no service to install.
 - **Small, understandable surface.** A focused feature set instead of a plugin
   ecosystem, a bundler, and a JavaScript toolchain.
-- **Batteries included.** Sections, pagination, tags, page bundles, drafts,
+- **Batteries included.** Sections, pagination, tags and categories with term
+  and overview pages, page bundles, drafts,
   aliases, RSS, sitemap, search index, `404.html`, a table of contents, syntax
   highlighting, a link checker, and a live-reloading dev server.
 - **Comfortable authoring.** TOML or YAML frontmatter, optional templates, and
@@ -196,7 +197,7 @@ Body in **Markdown**.
 | `description` | Meta description and list summary |
 | `summary` | Explicit summary, overriding the first paragraph |
 | `draft` | Excluded from builds unless `--drafts` is passed |
-| `tags`, `categories` | Taxonomy values; tags get their own pages |
+| `tags`, `categories` | Taxonomy values; each gets a term page and a taxonomy overview |
 | `template` | Template name for this page |
 | `slug` | Override the generated slug |
 | `url` | Override the generated URL |
@@ -229,6 +230,25 @@ Filenames can start with a date. `2024-05-01-hello.md` sets the date and derives
 the slug automatically. URL path segments are slugified, `slug` overrides the
 last segment, and tags that slugify to the same value share one tag page.
 
+## Taxonomies
+
+`tags` and `categories` are taxonomies: every distinct value gets a term page
+listing the pages that carry it, and each taxonomy gets an overview page listing
+its terms, like Hugo's `/tags/` and Zola's taxonomy pages.
+
+```text
+/tags/                     all tags, with counts
+/tags/rust/                pages tagged "Rust"
+/categories/               all categories
+/categories/engineering/   pages in "Engineering"
+```
+
+Terms are slugified and case-folded, so `Rust` and `rust` share `/tags/rust/`.
+Overview pages render with `taxonomy.html` (`page.terms[]` holds the terms);
+term pages use `category.html`, then `tag.html`, then `section.html`. All of
+them fall back to the embedded defaults, so nothing has to be added to a site
+for the pages to exist.
+
 ## Templates
 
 Templates use [MiniJinja](https://docs.rs/minijinja) and live in `templates/`.
@@ -239,11 +259,13 @@ back to them, so a site still builds without a `templates/` directory.
 | --- | --- |
 | `site.title`, `site.description`, `site.base_url`, `site.language`, `site.author`, `site.menu`, `site.year`, `site.post_count` | Site metadata |
 | `site.tags[].name`, `.url`, `.count`, `.latest_title`, `.latest_url` | Tags with post counts and the newest tagged post |
+| `site.categories[].name`, `.url`, `.count`, `.latest_title`, `.latest_url` | The same shape for categories |
 | `site.sections[].title`, `.url`, `.count` | Top-level sections, for building navigation |
 | `page.title`, `page.url`, `page.date`, `page.date_display`, `page.datetime`, `page.reading_minutes`, `page.description`, `page.content`, `page.tags`, `page.categories`, `page.slug`, `page.section`, `page.extra` | Current page or list page |
 | `page.updated`, `page.updated_display` | The `updated` frontmatter date, if set |
 | `page.words`, `page.toc`, `page.toc_html` | Word count, heading tree (`level`, `id`, `title`, `children`), and the same tree rendered as nested `<ul>` |
 | `page.paginator` | Pagination state on section pages: `current`, `total`, `page_size`, `item_count`, `prev_url`, `next_url`, `first_url`, `last_url`, `links[]` |
+| `page.terms[]` | Taxonomy overview pages only: `name`, `url`, `count` for each term |
 | `pages[].title`, `.url`, `.date`, `.date_display`, `.datetime`, `.reading_minutes`, `.summary`, `.tags`, `.section` | Page cards in list templates |
 
 `page.toc` is empty when a page has fewer than two headings. Every heading gets
@@ -251,8 +273,9 @@ a slugified `id`, so `#some-heading` links work out of the box; duplicate
 headings are disambiguated with a numeric suffix.
 
 The default templates are `base.html`, `page.html`, `section.html`,
-`index.html`, and `404.html`. Add `tag.html` to use a dedicated tag layout.
-Filters include `slugify`, `starts_with`, `safe`, and the MiniJinja built-ins.
+`index.html`, `taxonomy.html`, and `404.html`. Add `tag.html` or `category.html`
+to use a dedicated layout for those term pages. Filters include `slugify`,
+`starts_with`, `safe`, and the MiniJinja built-ins.
 
 ```html
 {% extends "base.html" %}
@@ -387,6 +410,34 @@ python3 bench/incremental.py --count 10000 --runs 5
 The old `agno build --no-clean` path, which re-rendered every page but skipped
 deleting the output tree, is gone: incremental builds are now the default and
 `--clean` is the opt-in full rebuild.
+
+### Section landing pages
+
+A site with many sections — documentation, notes, a course — used to pay for
+every `_index.md` on every build: the Markdown body was parsed and highlighted
+while content was loaded, even when the listing was unchanged and would not be
+written. Section bodies are now rendered on demand, once per section, inside the
+parallel list phase.
+
+Corpus: 300 sections, each with a `_index.md` containing two code blocks and
+five pages (1,801 pages). Medians of 5 runs, alternating the 0.3.2 and branch
+binaries on the same corpus:
+
+| Scenario | 0.3.2 | branch | |
+| --- | ---: | ---: | --- |
+| Cold build (`--clean`) | 379 ms | **330 ms** | 1.2× faster |
+| No-op rebuild | 118 ms | **31 ms** | 3.8× faster |
+| Single-edit rebuild | 116 ms | **40 ms** | 2.9× faster |
+
+The cold build is mostly deleting and rewriting 1,800 files on Btrfs, which is
+why it gains less than the rebuilds: the Markdown work that moved out of the
+content phase is a smaller share of it. A blog-shaped corpus without section
+bodies is unaffected — 3,000 posts rebuild in 40 ms either way, because there is
+no section Markdown to skip.
+
+```sh
+python3 bench/sections.py --sections 300 --per-section 5 --runs 7
+```
 
 > **Fairness note:** the Astro fixture renders Markdown pages only and does not
 > include syntax highlighting, taxonomies, RSS, or a sitemap. Its timings are

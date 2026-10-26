@@ -60,6 +60,11 @@ h1 { font-size: 1.9rem; margin: 0 0 1rem; }
 .post-list time { color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 .post-list p { margin: 0.2rem 0 0; color: var(--muted); }
 
+.term-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.5rem; }
+.term-list li { display: flex; justify-content: space-between; gap: 1rem; }
+.term-list a { text-decoration: none; font-weight: 600; }
+.term-list .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+
 .content img { max-width: 100%; height: auto; }
 
 .content pre {

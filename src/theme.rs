@@ -2,6 +2,7 @@ pub const BASE: &str = include_str!("../theme/base.html");
 pub const PAGE: &str = include_str!("../theme/page.html");
 pub const SECTION: &str = include_str!("../theme/section.html");
 pub const INDEX: &str = include_str!("../theme/index.html");
+pub const TAXONOMY: &str = include_str!("../theme/taxonomy.html");
 pub const NOT_FOUND: &str = include_str!("../theme/404.html");
 pub const STYLE: &str = include_str!("../theme/style.css");
 
@@ -10,5 +11,6 @@ pub const TEMPLATES: &[(&str, &str)] = &[
     ("page.html", PAGE),
     ("section.html", SECTION),
     ("index.html", INDEX),
+    ("taxonomy.html", TAXONOMY),
     ("404.html", NOT_FOUND),
 ];

@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::markdown;
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
 use serde_json::Value;
@@ -40,7 +39,6 @@ pub struct Page {
     /// Source line the body starts on; `body` is stored with frontmatter and
     /// leading blank lines removed, so link reports need this offset.
     pub body_line: usize,
-    pub html: String,
     /// Fingerprint of the page source; see [`crate::cache`].
     pub content_key: u64,
     pub section: Option<String>,
@@ -52,8 +50,10 @@ pub struct Listing {
     pub title: String,
     pub url: String,
     pub description: String,
-    pub content: String,
-    /// Markdown body of the section's `_index.md`, kept for `agno check`.
+    /// Markdown body of the section's `_index.md`, kept unrendered so an
+    /// unchanged listing does not pay for Markdown parsing and highlighting on
+    /// every build. It is rendered once, on demand, when the listing is
+    /// actually written; `agno check` reads it directly.
     pub body: String,
     /// Source line the body starts on.
     pub body_line: usize,
@@ -70,9 +70,25 @@ pub struct Content {
     pub pages: Vec<Page>,
     pub sections: Vec<Listing>,
     pub tags: Vec<Listing>,
+    pub categories: Vec<Listing>,
     /// Files that live next to a page bundle's `index.md` and are copied to
     /// the bundle's output directory.
     pub assets: Vec<Asset>,
+}
+
+impl Content {
+    /// The taxonomies that get an overview page (`/tags/`, `/categories/`),
+    /// in a stable order: kind, title, and the terms themselves.
+    pub fn taxonomies(&self) -> Vec<(&'static str, &'static str, &[Listing])> {
+        let mut out: Vec<(&'static str, &'static str, &[Listing])> = Vec::new();
+        if !self.tags.is_empty() {
+            out.push(("tags", "Tags", &self.tags));
+        }
+        if !self.categories.is_empty() {
+            out.push(("categories", "Categories", &self.categories));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -108,7 +124,6 @@ impl Listing {
             title: title.to_string(),
             url: url.to_string(),
             description: String::new(),
-            content: String::new(),
             body: String::new(),
             body_line: 0,
             source: PathBuf::new(),
@@ -178,35 +193,15 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
         .iter()
         .map(|key| {
             let url = section_url(key);
-            load_listing(cfg, &index_paths, key, &url)
+            load_listing(&index_paths, key, &url)
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Tags are grouped by their URL slug so "Rust" and "rust" share one page.
-    let mut tag_titles: BTreeMap<String, String> = BTreeMap::new();
-    for page in &pages {
-        for tag in &page.tags {
-            let slug = slugify(tag);
-            if !slug.is_empty() {
-                tag_titles.entry(slug).or_insert_with(|| tag.clone());
-            }
-        }
-    }
-    let tags = tag_titles
-        .into_iter()
-        .map(|(slug, title)| Listing {
-            key: slug.clone(),
-            title,
-            url: format!("/tags/{slug}/"),
-            description: String::new(),
-            content: String::new(),
-            body: String::new(),
-            body_line: 0,
-            source: PathBuf::new(),
-            paginate_by: None,
-            extra: Value::Object(Default::default()),
-        })
-        .collect();
+    // Tags and categories are grouped by their URL slug so "Rust" and "rust"
+    // share one page. Both are the same kind of listing, just a different
+    // frontmatter field and URL prefix.
+    let tags = taxonomy_terms(&pages, |page| &page.tags, "tags");
+    let categories = taxonomy_terms(&pages, |page| &page.categories, "categories");
 
     let assets = bundle_assets(&root, pages.iter(), asset_paths);
 
@@ -215,8 +210,26 @@ pub fn load(cfg: &Config, include_drafts: bool) -> Result<Content> {
         pages,
         sections,
         tags,
+        categories,
         assets,
     })
+}
+
+/// One listing per distinct term, ordered by slug so output is deterministic.
+fn taxonomy_terms(pages: &[Page], pick: impl Fn(&Page) -> &[String], kind: &str) -> Vec<Listing> {
+    let mut titles: BTreeMap<String, String> = BTreeMap::new();
+    for page in pages {
+        for term in pick(page) {
+            let slug = slugify(term);
+            if !slug.is_empty() {
+                titles.entry(slug).or_insert_with(|| term.clone());
+            }
+        }
+    }
+    titles
+        .into_iter()
+        .map(|(slug, title)| Listing::empty(&slug, &title, &format!("/{kind}/{slug}/")))
+        .collect()
 }
 
 /// Map each page bundle directory to the URL of its page, then attach every
@@ -296,27 +309,20 @@ fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<Pag
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let (fm, body) = split_frontmatter(&src)
         .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
-    let rendered = markdown::render(body, cfg.highlight);
     let mut page = empty_page(
         field_str(&fm, "title").unwrap_or_else(|| cfg.title.clone()),
         "/".into(),
     );
     page.source = path.clone();
     page.description = field_str(&fm, "description").unwrap_or_else(|| cfg.description.clone());
-    page.summary = field_str(&fm, "summary").unwrap_or(rendered.summary);
+    page.summary = field_str(&fm, "summary").unwrap_or_default();
     page.extra = fm;
-    page.html = rendered.html;
     page.body_line = body_start_line(&src, body);
     page.body = body.to_string();
     Ok(page)
 }
 
-fn load_listing(
-    cfg: &Config,
-    index_paths: &HashMap<String, PathBuf>,
-    key: &str,
-    url: &str,
-) -> Result<Listing> {
+fn load_listing(index_paths: &HashMap<String, PathBuf>, key: &str, url: &str) -> Result<Listing> {
     let Some(path) = index_paths.get(key) else {
         return Ok(Listing::empty(key, &section_title(key), url));
     };
@@ -324,13 +330,11 @@ fn load_listing(
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let (fm, body) = split_frontmatter(&src)
         .with_context(|| format!("parsing frontmatter in {}", path.display()))?;
-    let rendered = markdown::render(body, cfg.highlight);
     Ok(Listing {
         key: key.to_string(),
         title: field_str(&fm, "title").unwrap_or_else(|| section_title(key)),
         url: url.to_string(),
         description: field_str(&fm, "description").unwrap_or_default(),
-        content: rendered.html,
         body_line: body_start_line(&src, body),
         body: body.to_string(),
         source: path.clone(),
@@ -499,7 +503,6 @@ fn load_page(
         extra: fm,
         body_line: body_start_line(&src, body),
         body: body.to_string(),
-        html: String::new(),
         content_key: crate::cache::fingerprint(0, src.as_bytes()),
         section,
     }))
@@ -530,7 +533,6 @@ fn empty_page(title: String, url: String) -> Page {
         extra: Value::Object(Default::default()),
         body_line: 0,
         body: String::new(),
-        html: String::new(),
         content_key: 0,
         section: None,
     }

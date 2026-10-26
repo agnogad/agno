@@ -25,6 +25,17 @@ reports whole-build wall time, the `lists+feeds` phase that writes
 python3 bench/search_index.py --counts 1000 10000 --runs 9 --profile code
 ```
 
+## Section-heavy sites
+
+`sections.py` builds a documentation-shaped corpus — N sections, each with a
+`_index.md` that has two code blocks and M pages — and reports cold, no-op and
+single-edit builds. Section landing pages are Markdown that only has to be
+rendered when the listing is written, so this is the corpus that shows it.
+
+```sh
+python3 bench/sections.py --sections 300 --per-section 5 --runs 7
+```
+
 ## Corpus
 
 `gen.py` writes N posts (YAML frontmatter, tags, deterministic prose) into each

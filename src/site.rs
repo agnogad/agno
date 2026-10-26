@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -48,6 +49,7 @@ struct SiteView<'a> {
     year: i32,
     post_count: usize,
     tags: Vec<TagView<'a>>,
+    categories: Vec<TagView<'a>>,
     sections: Vec<SectionView<'a>>,
 }
 
@@ -121,6 +123,16 @@ struct ListView<'a> {
     extra: &'a Json,
     pages: Vec<CardView<'a>>,
     paginator: Option<&'a PagerView>,
+    /// Terms of a taxonomy overview page (`/tags/`, `/categories/`); empty on
+    /// every other list.
+    terms: Vec<TermView<'a>>,
+}
+
+#[derive(Serialize, Clone)]
+struct TermView<'a> {
+    name: &'a str,
+    url: &'a str,
+    count: usize,
 }
 
 /// A list before its cards are materialised. Keeping page references here lets
@@ -129,10 +141,15 @@ struct ListSpec<'a> {
     title: &'a str,
     url: String,
     description: &'a str,
-    content: &'a str,
+    /// Unrendered Markdown of the section's `_index.md`.
+    body: &'a str,
+    /// Filled in only when the list is actually written. Paginated pages of
+    /// one section share it, so the body is rendered once per section.
+    content: Arc<OnceLock<String>>,
     extra: Json,
     pages: Vec<&'a Page>,
     paginator: Option<PagerView>,
+    terms: Vec<TermView<'a>>,
     candidates: &'static [&'static str],
 }
 
@@ -167,28 +184,22 @@ fn page_url(section_url: &str, number: usize) -> String {
 struct PageIndex<'a> {
     sections: HashMap<&'a str, Vec<&'a Page>>,
     tags: HashMap<String, Vec<&'a Page>>,
+    categories: HashMap<String, Vec<&'a Page>>,
 }
 
 impl<'a> PageIndex<'a> {
     fn new(pages: &'a [Page]) -> Self {
         let mut sections: HashMap<&str, Vec<&Page>> = HashMap::new();
-        let mut tags: HashMap<String, Vec<&Page>> = HashMap::new();
         for page in pages {
             if let Some(section) = page.section.as_deref() {
                 sections.entry(section).or_default().push(page);
             }
-            // Pages carry a handful of tags, so a linear scan beats building a
-            // set per page just to drop duplicates that share a slug.
-            let mut seen: Vec<String> = Vec::new();
-            for tag in &page.tags {
-                let slug = content::slugify(tag);
-                if !slug.is_empty() && !seen.contains(&slug) {
-                    seen.push(slug.clone());
-                    tags.entry(slug).or_default().push(page);
-                }
-            }
         }
-        Self { sections, tags }
+        Self {
+            sections,
+            tags: term_index(pages, |page| &page.tags),
+            categories: term_index(pages, |page| &page.categories),
+        }
     }
 
     fn section(&self, key: &str) -> &[&'a Page] {
@@ -198,6 +209,40 @@ impl<'a> PageIndex<'a> {
     fn tag(&self, key: &str) -> &[&'a Page] {
         self.tags.get(key).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    fn category(&self, key: &str) -> &[&'a Page] {
+        self.categories.get(key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Pages carrying one term, whichever taxonomy `kind` names.
+    fn terms(&self, kind: &str, key: &str) -> &[&'a Page] {
+        if kind == "tags" {
+            self.tag(key)
+        } else {
+            self.category(key)
+        }
+    }
+}
+
+/// Group pages by the slug of each term in one taxonomy. Pages carry a handful
+/// of terms, so a linear scan beats building a set per page just to drop
+/// duplicates that share a slug.
+fn term_index(
+    pages: &[Page],
+    pick: for<'p> fn(&'p Page) -> &'p [String],
+) -> HashMap<String, Vec<&Page>> {
+    let mut index: HashMap<String, Vec<&Page>> = HashMap::new();
+    for page in pages {
+        let mut seen: Vec<String> = Vec::new();
+        for term in pick(page) {
+            let slug = content::slugify(term);
+            if !slug.is_empty() && !seen.contains(&slug) {
+                seen.push(slug.clone());
+                index.entry(slug).or_default().push(page);
+            }
+        }
+    }
+    index
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -432,8 +477,11 @@ pub(crate) fn expected_outputs(
             }
         }
     }
-    for tag in &content.tags {
-        expected.insert(output_rel(&tag.url));
+    for (kind, _, terms) in content.taxonomies() {
+        expected.insert(output_rel(&format!("/{kind}/")));
+        for term in terms {
+            expected.insert(output_rel(&term.url));
+        }
     }
 
     expected.insert("rss.xml".into());
@@ -463,25 +511,31 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
         title: &content.home.title,
         url: "/".to_string(),
         description: &content.home.description,
-        content: &content.home.html,
+        body: &content.home.body,
+        content: Arc::new(OnceLock::new()),
         extra: content.home.extra.clone(),
         pages: content.pages.iter().collect(),
         paginator: None,
+        terms: Vec::new(),
         candidates: &["index.html"],
     });
     for section in &content.sections {
         let all = index.section(&section.key);
         let page_size = section.paginate_by.unwrap_or(0);
         let total = section_page_count(section, all.len());
+        // One cell per section: every paginated page renders the same body.
+        let content_cell = Arc::new(OnceLock::new());
         if total <= 1 {
             lists.push(ListSpec {
                 title: &section.title,
                 url: section.url.clone(),
                 description: &section.description,
-                content: &section.content,
+                body: &section.body,
+                content: content_cell,
                 extra: section.extra.clone(),
                 pages: all.to_vec(),
                 paginator: None,
+                terms: Vec::new(),
                 candidates: &["section.html"],
             });
             continue;
@@ -504,7 +558,8 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                 title: &section.title,
                 url,
                 description: &section.description,
-                content: &section.content,
+                body: &section.body,
+                content: Arc::clone(&content_cell),
                 extra: section.extra.clone(),
                 pages: chunk.to_vec(),
                 paginator: Some(PagerView {
@@ -518,30 +573,72 @@ fn build_lists<'a>(content: &'a Content, index: &PageIndex<'a>) -> Vec<ListSpec<
                     last_url: page_url(&section.url, total),
                     links,
                 }),
+                terms: Vec::new(),
                 candidates: &["section.html"],
             });
         }
+    }
+    // A taxonomy gets an overview page (`/tags/`) listing its terms, the same
+    // way Hugo and Zola do, followed by one listing per term.
+    for (kind, title, terms) in content.taxonomies() {
+        lists.push(ListSpec {
+            title,
+            url: format!("/{kind}/"),
+            description: "",
+            body: "",
+            content: Arc::new(OnceLock::new()),
+            extra: Json::Object(Default::default()),
+            pages: Vec::new(),
+            paginator: None,
+            terms: terms
+                .iter()
+                .map(|term| TermView {
+                    name: &term.title,
+                    url: &term.url,
+                    count: index.terms(kind, &term.key).len(),
+                })
+                .collect(),
+            candidates: &["taxonomy.html"],
+        });
     }
     for tag in &content.tags {
         lists.push(ListSpec {
             title: &tag.title,
             url: tag.url.clone(),
             description: "",
-            content: "",
+            body: "",
+            content: Arc::new(OnceLock::new()),
             extra: Json::Object(Default::default()),
             pages: index.tag(&tag.key).to_vec(),
             paginator: None,
+            terms: Vec::new(),
             candidates: &["tag.html", "section.html"],
+        });
+    }
+    for category in &content.categories {
+        lists.push(ListSpec {
+            title: &category.title,
+            url: category.url.clone(),
+            description: "",
+            body: "",
+            content: Arc::new(OnceLock::new()),
+            extra: Json::Object(Default::default()),
+            pages: index.category(&category.key).to_vec(),
+            paginator: None,
+            terms: Vec::new(),
+            candidates: &["category.html", "tag.html", "section.html"],
         });
     }
     lists.push(ListSpec {
         title: "404",
         url: "/404.html".to_string(),
         description: "",
-        content: "",
+        body: "",
+        content: Arc::new(OnceLock::new()),
         extra: Json::Object(Default::default()),
         pages: Vec::new(),
         paginator: None,
+        terms: Vec::new(),
         candidates: &["404.html"],
     });
     lists
@@ -633,6 +730,16 @@ fn render_list(
     name: &str,
 ) -> Result<()> {
     let url = &list.url;
+    // Section bodies are rendered here, not while loading content: an
+    // unchanged listing is skipped entirely, so its Markdown never has to be
+    // parsed or highlighted on a rebuild.
+    let content = if list.body.is_empty() {
+        ""
+    } else {
+        list.content
+            .get_or_init(|| markdown::render(list.body, cfg.highlight).html)
+            .as_str()
+    };
     let cards: Vec<CardView<'_>> = list
         .pages
         .iter()
@@ -642,10 +749,11 @@ fn render_list(
         title: list.title,
         url: list.url.as_str(),
         description: list.description,
-        content: list.content,
+        content,
         extra: &list.extra,
         pages: cards,
         paginator: list.paginator.as_ref(),
+        terms: list.terms.clone(),
     };
     let ctx = context! {
         site => site.clone(),
@@ -670,10 +778,15 @@ fn list_key(
     hash = cache::fingerprint(hash, list.url.as_bytes());
     hash = cache::fingerprint(hash, list.title.as_bytes());
     hash = cache::fingerprint(hash, list.description.as_bytes());
-    hash = cache::fingerprint(hash, list.content.as_bytes());
+    hash = cache::fingerprint(hash, list.body.as_bytes());
     // Section extras are template data that no other fingerprint covers.
     if let Ok(extra) = serde_json::to_string(&list.extra) {
         hash = cache::fingerprint(hash, extra.as_bytes());
+    }
+    for term in &list.terms {
+        hash = cache::fingerprint(hash, term.name.as_bytes());
+        hash = cache::fingerprint(hash, term.url.as_bytes());
+        hash = cache::fingerprint(hash, &(term.count as u64).to_le_bytes());
     }
     for page in &list.pages {
         // Each card carries a fingerprint of the fields it renders, computed
@@ -889,8 +1002,11 @@ fn validate_urls(cfg: &Config, content: &Content, static_paths: &[String]) -> Re
             )?;
         }
     }
-    for tag in &content.tags {
-        out.add(&tag.url, &format!("tag {}", tag.title))?;
+    for (kind, _, terms) in content.taxonomies() {
+        out.add(&format!("/{kind}/"), &format!("{kind} index"))?;
+        for term in terms {
+            out.add(&term.url, &format!("{kind} term {}", term.title))?;
+        }
     }
     for asset in &content.assets {
         out.add(&asset.url, &format!("asset {}", asset.source.display()))?;
@@ -1020,27 +1136,14 @@ fn write_text(output: &Path, name: &str, body: &str) -> Result<()> {
     fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
-fn site_view<'a>(cfg: &Config, content: &'a Content, index: &PageIndex<'a>) -> SiteView<'a> {
+fn site_view<'a>(cfg: &Config, content: &'a Content, index: &'a PageIndex<'a>) -> SiteView<'a> {
     let post_count = content
         .pages
         .iter()
         .filter(|page| page.date.is_some())
         .count();
-    let tags = content
-        .tags
-        .iter()
-        .map(|tag| {
-            let pages = index.tag(&tag.key);
-            let latest = pages.first().copied();
-            TagView {
-                name: &tag.title,
-                url: &tag.url,
-                count: pages.len(),
-                latest_title: latest.map(|page| page.title.as_str()).unwrap_or_default(),
-                latest_url: latest.map(|page| page.url.as_str()).unwrap_or_default(),
-            }
-        })
-        .collect();
+    let tags = term_views(&content.tags, |key| index.tag(key));
+    let categories = term_views(&content.categories, |key| index.category(key));
     let sections = content
         .sections
         .iter()
@@ -1063,8 +1166,30 @@ fn site_view<'a>(cfg: &Config, content: &'a Content, index: &PageIndex<'a>) -> S
         year: OffsetDateTime::now_utc().year(),
         post_count,
         tags,
+        categories,
         sections,
     }
+}
+
+/// `site.tags` / `site.categories`: every term with its count and newest page.
+fn term_views<'a>(
+    terms: &'a [Listing],
+    pages_of: impl Fn(&str) -> &'a [&'a Page],
+) -> Vec<TagView<'a>> {
+    terms
+        .iter()
+        .map(|term| {
+            let pages = pages_of(&term.key);
+            let latest = pages.first().copied();
+            TagView {
+                name: &term.title,
+                url: &term.url,
+                count: pages.len(),
+                latest_title: latest.map(|page| page.title.as_str()).unwrap_or_default(),
+                latest_url: latest.map(|page| page.url.as_str()).unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 fn page_view<'a>(
@@ -1213,8 +1338,11 @@ fn sitemap(cfg: &Config, content: &Content) -> String {
             push_url(&mut urls, cfg, &page_url(&section.url, number), None);
         }
     }
-    for tag in &content.tags {
-        push_url(&mut urls, cfg, &tag.url, None);
+    for (kind, _, terms) in content.taxonomies() {
+        push_url(&mut urls, cfg, &format!("/{kind}/"), None);
+        for term in terms {
+            push_url(&mut urls, cfg, &term.url, None);
+        }
     }
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">{urls}</urlset>\n"

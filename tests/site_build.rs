@@ -245,6 +245,115 @@ fn tag_slugs_are_merged() {
 }
 
 #[test]
+fn categories_get_term_pages_and_an_overview() {
+    let root = fixture("categories");
+    fs::write(
+        root.join("content/blog/hello.md"),
+        "+++\ntitle = \"Hello\"\ndate = 2024-05-01\ntags = [\"Rust\"]\ncategories = [\"Engineering\", \"Notes\"]\n+++\n\nPost.\n",
+    )
+    .unwrap();
+
+    clean_build(&root);
+
+    let term = text(&root.join("dist/categories/engineering/index.html"));
+    assert!(term.contains("Hello"), "{term}");
+
+    let overview = text(&root.join("dist/categories/index.html"));
+    assert!(overview.contains("/categories/engineering/"), "{overview}");
+    assert!(overview.contains("/categories/notes/"), "{overview}");
+
+    let page = text(&root.join("dist/blog/hello/index.html"));
+    assert!(page.contains("/categories/engineering/"), "{page}");
+
+    let sitemap = text(&root.join("dist/sitemap.xml"));
+    assert_eq!(sitemap.matches("/categories/engineering/").count(), 1);
+    assert!(sitemap.contains("<loc>https://example.com/categories/</loc>"));
+}
+
+#[test]
+fn the_tags_index_lists_every_term_with_its_count() {
+    let root = fixture("tags-index");
+
+    clean_build(&root);
+
+    let index = text(&root.join("dist/tags/index.html"));
+    assert!(index.contains("/tags/rust/"), "{index}");
+    assert!(index.contains("/tags/cigir/"), "{index}");
+    assert!(index.contains("<span class=\"count\">1</span>"), "{index}");
+}
+
+#[test]
+fn a_site_without_terms_gets_no_taxonomy_index() {
+    let root = fixture("no-taxonomies");
+    fs::write(
+        root.join("content/blog/hello.md"),
+        "+++\ntitle = \"Hello\"\ndate = 2024-05-01\n+++\n\nPost.\n",
+    )
+    .unwrap();
+
+    clean_build(&root);
+
+    assert!(!root.join("dist/tags/index.html").exists());
+    assert!(!root.join("dist/categories/index.html").exists());
+}
+
+#[test]
+fn custom_taxonomy_template_overrides_the_default() {
+    let root = fixture("taxonomy-template");
+    fs::create_dir_all(root.join("templates")).unwrap();
+    fs::write(
+        root.join("templates/taxonomy.html"),
+        "terms:{% for term in page.terms %}{{ term.name }}={{ term.count }};{% endfor %}",
+    )
+    .unwrap();
+
+    clean_build(&root);
+
+    assert_eq!(
+        text(&root.join("dist/tags/index.html")),
+        "terms:Çığır=1;Rust=1;"
+    );
+}
+
+#[test]
+fn a_page_cannot_take_a_taxonomy_url() {
+    let root = fixture("taxonomy-collision");
+    fs::write(
+        root.join("content/tags.md"),
+        "+++\ntitle = \"Tags\"\nurl = \"/tags/\"\n+++\n\nBody.\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate output URL"), "{err}");
+}
+
+#[test]
+fn editing_a_section_index_rerenders_its_listing() {
+    let root = fixture("section-body");
+    build_incremental(&root);
+
+    fs::write(
+        root.join("content/blog/_index.md"),
+        "+++\ntitle = \"Blog\"\n+++\n\nBrand new intro.\n",
+    )
+    .unwrap();
+    build_incremental(&root);
+
+    let listing = text(&root.join("dist/blog/index.html"));
+    assert!(listing.contains("Brand new intro."), "{listing}");
+}
+
+#[test]
 fn slugs_and_dotted_custom_urls_get_their_own_directories() {
     let root = fixture("url-model");
     fs::create_dir_all(root.join("content/docs")).unwrap();

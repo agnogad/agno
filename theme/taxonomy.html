@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ page.title }}</h1>
+{% if page.description %}<p class="meta">{{ page.description }}</p>{% endif %}
+{% if page.content %}<div class="content">{{ page.content|safe }}</div>{% endif %}
+<ul class="term-list">
+  {% for term in page.terms %}
+  <li><a href="{{ term.url|safe }}">{{ term.name }}</a> <span class="count">{{ term.count }}</span></li>
+  {% endfor %}
+</ul>
+{% endblock %}
