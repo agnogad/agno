@@ -135,18 +135,17 @@ impl Config {
         }
 
         let output_path = self.output();
-        if let Ok(meta) = std::fs::symlink_metadata(&output_path) {
-            if meta.file_type().is_symlink() {
-                bail!("output_dir must not be a symlink");
-            }
+        if let Ok(meta) = std::fs::symlink_metadata(&output_path)
+            && meta.file_type().is_symlink()
+        {
+            bail!("output_dir must not be a symlink");
         }
         if let (Ok(root), Ok(parent)) = (
             self.root.canonicalize(),
             output_path.parent().unwrap_or(&output_path).canonicalize(),
-        ) {
-            if !parent.starts_with(&root) {
-                bail!("output_dir must stay inside the site root");
-            }
+        ) && !parent.starts_with(&root)
+        {
+            bail!("output_dir must stay inside the site root");
         }
 
         Ok(())
