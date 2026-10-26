@@ -94,3 +94,20 @@ jobs:
             target/release/agno.exe
           if-no-files-found: error
           retention-days: 14
+
+  # rust-version in Cargo.toml is a promise to anyone building from source, so
+  # it gets a job of its own. `--locked` is the point: the committed lockfile
+  # has to work on the declared toolchain, not just on whatever is current.
+  msrv:
+    name: msrv (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        run: cargo check --all-targets --locked

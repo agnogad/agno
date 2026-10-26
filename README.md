@@ -3,7 +3,7 @@
 [![CI](https://github.com/agnogad/agno/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agnogad/agno/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/agno.svg)](https://crates.io/crates/agno)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
 **A fast, content-first static site generator written in Rust.**
 
@@ -63,7 +63,7 @@ and caveats.
 
 ### Requirements
 
-- Rust **1.85+** (edition 2024)
+- Rust **1.88+** (edition 2024; `time` and `plist` need 1.88)
 - A C toolchain at build time (`cc`, MSVC, or Xcode command-line tools). The
   syntax highlighter bundles Oniguruma; the resulting binary is still fully
   static at runtime.
