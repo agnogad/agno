@@ -69,10 +69,28 @@ and caveats.
   static at runtime.
 
 > [!NOTE]
-> agno **0.3.2** is published on
-> [crates.io](https://crates.io/crates/agno). Prebuilt binaries are planned for
-> GitHub Releases; until then, install from crates.io, from Git, or build from
-> source.
+> agno is published on [crates.io](https://crates.io/crates/agno), and every
+> tagged release carries prebuilt binaries for Linux, macOS (Intel and Apple
+> silicon) and Windows on the
+> [releases page](https://github.com/agnogad/agno/releases). The crates.io
+> version can lag a release by a few days; the binaries never do.
+
+### Install a prebuilt binary
+
+No Rust needed. Take the archive for your platform from the
+[latest release](https://github.com/agnogad/agno/releases/latest), unpack it,
+and put `agno` somewhere on your `PATH`:
+
+```sh
+curl -L https://github.com/agnogad/agno/releases/latest/download/agno-0.3.3-x86_64-unknown-linux-gnu.tar.gz \
+  | tar -xz
+sudo install agno-0.3.3-x86_64-unknown-linux-gnu/agno /usr/local/bin/
+```
+
+Swap `x86_64-unknown-linux-gnu` for `aarch64-apple-darwin`,
+`x86_64-apple-darwin` or `x86_64-pc-windows-msvc` (the Windows archive is a
+`.zip`). The archives are built by CI on each platform, not cross-compiled
+from a laptop.
 
 ### Install from crates.io
 
@@ -98,7 +116,7 @@ cargo install --path .
 
 ```sh
 agno --version
-# agno 0.3.2
+# agno 0.3.3
 ```
 
 ## Quick start
