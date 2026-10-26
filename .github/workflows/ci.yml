@@ -86,7 +86,7 @@ jobs:
           "$bin" clean
           test ! -d dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: agno-${{ runner.os }}-${{ runner.arch }}
           path: |
