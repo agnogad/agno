@@ -82,9 +82,9 @@ No Rust needed. Take the archive for your platform from the
 and put `agno` somewhere on your `PATH`:
 
 ```sh
-curl -L https://github.com/agnogad/agno/releases/latest/download/agno-0.3.3-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/agnogad/agno/releases/latest/download/agno-0.3.4-x86_64-unknown-linux-gnu.tar.gz \
   | tar -xz
-sudo install agno-0.3.3-x86_64-unknown-linux-gnu/agno /usr/local/bin/
+sudo install agno-0.3.4-x86_64-unknown-linux-gnu/agno /usr/local/bin/
 ```
 
 Swap `x86_64-unknown-linux-gnu` for `aarch64-apple-darwin`,
@@ -92,10 +92,26 @@ Swap `x86_64-unknown-linux-gnu` for `aarch64-apple-darwin`,
 `.zip`). The archives are built by CI on each platform, not cross-compiled
 from a laptop.
 
-The Linux binary is linked against glibc **2.34 or newer** — Ubuntu 22.04,
-Debian 12, RHEL 9 and anything later. On an older distribution (Ubuntu 20.04,
-Debian 11) it will fail at startup with a `GLIBC_2.34 not found` message;
-install from crates.io there, which builds against the system toolchain.
+#### Linux: gnu or musl
+
+There are two Linux archives, and they are not equally fast.
+
+| | `x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-musl` |
+|---|---|---|
+| runs on | glibc 2.34+ (Ubuntu 22.04, Debian 12, RHEL 9) | any x86_64 Linux, fully static |
+| 3000 pages, 12 threads | 0.12 s | 0.84 s |
+| 3000 pages, 1 thread | 0.28 s | 0.40 s |
+
+Take **gnu** unless it refuses to start. The musl build links libc statically,
+which is what you want in an Alpine or `scratch` container or on a distribution
+older than glibc 2.34 — but musl's allocator serialises across threads, so it
+does not merely start slower, it *loses* speed as you give it cores: 1.4× behind
+gnu on one thread, 6.9× behind on twelve. If you do run the musl build on a
+multi-core machine, `RAYON_NUM_THREADS=1` recovers most of the gap.
+
+The gnu binary needs glibc 2.34 or newer; on Ubuntu 20.04 or Debian 11 it fails
+at startup with `GLIBC_2.34 not found`. Use the musl archive there, or install
+from crates.io, which builds against the system toolchain.
 
 ### Install from crates.io
 
@@ -121,7 +137,7 @@ cargo install --path .
 
 ```sh
 agno --version
-# agno 0.3.3
+# agno 0.3.4
 ```
 
 ## Quick start
