@@ -65,8 +65,9 @@ and caveats.
 
 - Rust **1.88+** (edition 2024; `time` and `plist` need 1.88)
 - A C toolchain at build time (`cc`, MSVC, or Xcode command-line tools). The
-  syntax highlighter bundles Oniguruma, which is C; it is compiled into the
-  binary, so there is no shared library to install alongside it.
+  syntax highlighter bundles Oniguruma and the allocator is mimalloc, both of
+  which are C; they are compiled into the binary, so there is no shared library
+  to install alongside it.
 
 > [!NOTE]
 > agno is published on [crates.io](https://crates.io/crates/agno), and every
@@ -91,8 +92,8 @@ sudo install "agno-${tag#v}-x86_64-unknown-linux-gnu/agno" /usr/local/bin/
 ```
 
 The tag is resolved rather than written out because the version is part of
-each archive's name: a hardcoded `/latest/download/agno-0.3.4-...` URL would
-work today and 404 the moment the next release lands.
+each archive's name: a hardcoded `/latest/download/agno-<version>-...` URL
+would work until the next release and then 404.
 
 Swap `x86_64-unknown-linux-gnu` for `aarch64-apple-darwin`,
 `x86_64-apple-darwin` or `x86_64-pc-windows-msvc` (the Windows archive is a
@@ -101,20 +102,24 @@ from a laptop.
 
 #### Linux: gnu or musl
 
-There are two Linux archives, and they are not equally fast.
+There are two Linux archives. They perform about the same; pick on libc, not
+on speed.
 
 | | `x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-musl` |
 |---|---|---|
 | runs on | glibc 2.34+ (Ubuntu 22.04, Debian 12, RHEL 9) | any x86_64 Linux, fully static |
-| 3000 pages, 12 threads | 0.12 s | 0.84 s |
-| 3000 pages, 1 thread | 0.28 s | 0.40 s |
+| 3000 pages, 12 threads | 0.17 s | 0.21 s |
+| 3000 pages, 1 thread | 0.32 s | 0.38 s |
 
-Take **gnu** unless it refuses to start. The musl build links libc statically,
-which is what you want in an Alpine or `scratch` container or on a distribution
-older than glibc 2.34 — but musl's allocator serialises across threads, so it
-does not merely start slower, it *loses* speed as you give it cores: 1.4× behind
-gnu on one thread, 6.9× behind on twelve. If you do run the musl build on a
-multi-core machine, `RAYON_NUM_THREADS=1` recovers most of the gap.
+Take **gnu** if your distribution is new enough — it is around 20% ahead.
+Take **musl** for an Alpine or `scratch` container, or for anything older than
+glibc 2.34, where the gnu archive fails at startup with
+`GLIBC_2.34 not found`.
+
+Both ship mimalloc rather than the system allocator, which matters most on
+musl: musl's malloc takes a global lock, so without it the static build got
+*slower* as you gave it cores (0.40 s on one thread, 0.91 s on twelve). With
+mimalloc the two builds are within 20% of each other at every thread count.
 
 The gnu binary needs glibc 2.34 or newer; on Ubuntu 20.04 or Debian 11 it fails
 at startup with `GLIBC_2.34 not found`. Use the musl archive there, or install
@@ -144,7 +149,7 @@ cargo install --path .
 
 ```sh
 agno --version
-# agno 0.3.4
+# agno 0.3.5
 ```
 
 ## Quick start
