@@ -83,9 +83,15 @@ pub fn render(input: &str, highlight: bool) -> Rendered {
         match event {
             Event::Start(Tag::CodeBlock(kind)) => {
                 let lang = match kind {
-                    CodeBlockKind::Fenced(info) => {
-                        info.split_whitespace().next().unwrap_or("").to_string()
-                    }
+                    // The info string may carry options after the language, as
+                    // in ```` ```rust,linenos ```` or ```` ```rust {linenos}
+                    // ````; only the first token names the syntax.
+                    CodeBlockKind::Fenced(info) => info
+                        .split([',', ';'])
+                        .flat_map(str::split_whitespace)
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
                     CodeBlockKind::Indented => String::new(),
                 };
                 let mut code = String::new();
@@ -377,6 +383,19 @@ mod tests {
         let rendered = render("```rust\nfn main() {}\n```", true);
         assert!(rendered.html.contains("<span style="));
         assert!(!rendered.html.contains("```"));
+    }
+
+    #[test]
+    fn a_fence_option_after_the_language_is_ignored() {
+        for fence in ["rust,linenos", "rust linenos", "rust {linenos}"] {
+            let rendered = render(&format!("```{fence}\nfn main() {{}}\n```"), true);
+            assert!(
+                rendered.html.contains("<span style="),
+                "no highlighting for {fence:?}: {}",
+                rendered.html
+            );
+            assert!(!rendered.html.contains("language-rustlinenos"));
+        }
     }
 
     #[test]

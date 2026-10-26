@@ -362,8 +362,8 @@ fn load_home(cfg: &Config, index_paths: &HashMap<String, PathBuf>) -> Result<(Pa
     page.template = field_str(&fm, "template");
     // The home page has no filename date, but its frontmatter dates are real:
     // they feed `<lastmod>` in the sitemap and `page.date` in the template.
-    let date = field_str(&fm, "date").and_then(|s| parse_date(&s));
-    let updated = field_str(&fm, "updated").and_then(|s| parse_date(&s));
+    let date = field_date(&fm, "date", path)?;
+    let updated = field_date(&fm, "updated", path)?;
     let (date_text, datetime, date_display, updated_text, updated_display) =
         date_fields(date, updated, &cfg.language);
     page.date = date;
@@ -451,10 +451,8 @@ fn load_page(
 
     let (filename_date, stem_clean) = split_date_prefix(&file_stem);
 
-    let date = field_str(&fm, "date")
-        .and_then(|s| parse_date(&s))
-        .or_else(|| filename_date.and_then(parse_date));
-    let updated = field_str(&fm, "updated").and_then(|s| parse_date(&s));
+    let date = field_date(&fm, "date", path)?.or_else(|| filename_date.and_then(parse_date));
+    let updated = field_date(&fm, "updated", path)?;
     let (date_text, datetime, date_display, updated_text, updated_display) =
         date_fields(date, updated, language);
     let word_count = body.split_whitespace().count();
@@ -877,6 +875,25 @@ pub fn format_date_display(date: OffsetDateTime, language: &str) -> String {
         date.day(),
         date.year()
     )
+}
+
+/// A frontmatter date, refused when it is present but not a date. Dropping a
+/// typo'd date without a word would take the page out of the feed and out of
+/// the date ordering.
+fn field_date(fm: &Value, key: &str, path: &Path) -> Result<Option<OffsetDateTime>> {
+    let Some(raw) = field_str(fm, key) else {
+        return Ok(None);
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    match parse_date(&raw) {
+        Some(date) => Ok(Some(date)),
+        None => bail!(
+            "invalid {key} \"{raw}\" in {}: expected YYYY-MM-DD or an RFC 3339 timestamp",
+            path.display()
+        ),
+    }
 }
 
 pub fn parse_date(input: &str) -> Option<OffsetDateTime> {

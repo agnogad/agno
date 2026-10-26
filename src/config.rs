@@ -97,6 +97,18 @@ impl Config {
 
     /// Reject output paths that could delete the site or another input directory.
     pub fn validate(&self) -> Result<()> {
+        // Canonical links, the sitemap and the feed all concatenate this with
+        // a page path, so a bare host name silently produces relative URLs in
+        // every one of them.
+        if !self.base_url.is_empty()
+            && !(self.base_url.starts_with("http://") || self.base_url.starts_with("https://"))
+        {
+            bail!(
+                "base_url must be an absolute http(s) URL, found \"{}\"",
+                self.base_url
+            );
+        }
+
         let root = normalize(&self.root);
         let output = normalize(&self.output());
 

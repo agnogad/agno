@@ -260,8 +260,10 @@ Each neighbour is `{ title, url, date_display }`. Changing the order, adding a
 page or renaming one re-renders the pages around it on the next build, because
 their navigation changed too.
 
-A directory under `content/` becomes a section. A file named `index.md` turns
-its directory into a page bundle:
+A directory that directly contains pages becomes a section, at any depth, and
+gets a listing at its own URL. A directory that only holds subdirectories is
+not a section by itself: give it an `_index.md` if you want a landing page
+there. A file named `index.md` turns its directory into a page bundle:
 
 ```text
 content/blog/hello/index.md  →  /blog/hello/
@@ -369,6 +371,9 @@ url = "/about/"
 
 Set `search_index = true` to emit `search-index.json` for client-side search.
 `page.date_display` follows `language` for Turkish and English month names.
+`base_url` must be an absolute `http(s)` URL: canonical links, the sitemap and
+the feed are built from it, so a bare host name would make every one of them
+relative.
 `output_dir` must stay inside the site root and must not overlap `content_dir`,
 `templates_dir`, or `static_dir`; agno rejects unsafe values instead of deleting
 your inputs.

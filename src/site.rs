@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use walkdir::WalkDir;
@@ -307,6 +307,10 @@ struct Manifest {
 
 pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let started = Instant::now();
+    // Anything in the output directory written at or after this instant came
+    // from this build, so a copy must not be skipped because it looks newer
+    // than its source.
+    let build_started = SystemTime::now();
     let mut cfg = Config::load(root)?;
     if opts.minify {
         cfg.minify = true;
@@ -482,8 +486,8 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         ),
     )?;
 
-    copy_static(&cfg, &static_files)?;
-    copy_assets(&cfg, &content.assets)?;
+    copy_static(&cfg, &static_files, build_started)?;
+    copy_assets(&cfg, &content.assets, build_started)?;
     if !has_static_style {
         write_text(&output, "style.css", theme::STYLE)?;
     }
@@ -1591,7 +1595,7 @@ pub(crate) fn static_paths(cfg: &Config) -> Result<Vec<String>> {
     static_rels(cfg, &static_files(cfg)?)
 }
 
-fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
+fn copy_static(cfg: &Config, files: &[PathBuf], build_started: SystemTime) -> Result<()> {
     let src = cfg.static_dir();
     let dest = cfg.output();
     files.par_iter().try_for_each(|file| {
@@ -1600,8 +1604,10 @@ fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
         // `fs::copy` stamps the target with the current time, so a target that
         // is at least as new as its source with the same size is already a
         // faithful copy. Re-copying untouched assets was the bulk of a rebuild
-        // on sites with images or fonts.
-        if is_up_to_date(file, &target) {
+        // on sites with images or fonts. A target this build just wrote is not
+        // a copy of anything, though: `static/index.html` overrides a rendered
+        // page, and the two can easily be the same length.
+        if is_up_to_date(file, &target, build_started) {
             return Ok(());
         }
         if let Some(parent) = target.parent() {
@@ -1613,11 +1619,11 @@ fn copy_static(cfg: &Config, files: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn copy_assets(cfg: &Config, assets: &[content::Asset]) -> Result<()> {
+fn copy_assets(cfg: &Config, assets: &[content::Asset], build_started: SystemTime) -> Result<()> {
     let dest = cfg.output();
     assets.par_iter().try_for_each(|asset| {
         let target = dest.join(output_rel(&asset.url));
-        if is_up_to_date(&asset.source, &target) {
+        if is_up_to_date(&asset.source, &target, build_started) {
             return Ok(());
         }
         if let Some(parent) = target.parent() {
@@ -1629,7 +1635,11 @@ fn copy_assets(cfg: &Config, assets: &[content::Asset]) -> Result<()> {
     Ok(())
 }
 
-fn is_up_to_date(source: &Path, target: &Path) -> bool {
+/// True when `target` is a copy of `source` that does not need to be redone.
+/// `build_started` marks the point before which `target` must have been
+/// written for it to be a copy from an earlier build rather than this one's
+/// output.
+fn is_up_to_date(source: &Path, target: &Path, build_started: SystemTime) -> bool {
     let (Ok(src), Ok(dst)) = (fs::metadata(source), fs::metadata(target)) else {
         return false;
     };
@@ -1637,7 +1647,7 @@ fn is_up_to_date(source: &Path, target: &Path) -> bool {
         return false;
     }
     match (src.modified(), dst.modified()) {
-        (Ok(src), Ok(dst)) => dst >= src,
+        (Ok(src), Ok(dst)) => dst >= src && dst < build_started,
         _ => false,
     }
 }

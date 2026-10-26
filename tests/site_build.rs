@@ -1741,3 +1741,105 @@ fn a_long_frontmatter_summary_survives_a_rebuild() {
     assert_eq!(first, second, "the cached summary was truncated");
     assert!(second.contains(&summary), "the full summary is missing");
 }
+
+// ---- static overrides ---------------------------------------------------
+
+#[test]
+fn a_static_file_overrides_generated_output_of_the_same_length() {
+    let root = fixture("static-same-length");
+    let generated = format!(
+        "User-agent: *\nAllow: /\n\nSitemap: {}/sitemap.xml\n",
+        "https://example.com"
+    );
+    let mut custom = String::from("User-agent: *\nDisallow: /\n");
+    custom.push_str(&"#".repeat(generated.len() - custom.len() - 1));
+    custom.push('\n');
+    assert_eq!(custom.len(), generated.len(), "the test needs a tie");
+
+    fs::create_dir_all(root.join("static")).unwrap();
+    fs::write(root.join("static/robots.txt"), &custom).unwrap();
+
+    build_incremental(&root);
+    assert_eq!(
+        text(&root.join("dist/robots.txt")),
+        custom,
+        "the generated robots.txt replaced a same-length static override"
+    );
+
+    build_incremental(&root);
+    assert_eq!(
+        text(&root.join("dist/robots.txt")),
+        custom,
+        "the override survived one build but not two"
+    );
+}
+
+#[test]
+fn a_static_index_html_overrides_the_home_page_of_the_same_length() {
+    let root = fixture("static-index");
+    build_incremental(&root);
+    let generated = text(&root.join("dist/index.html"));
+
+    let mut custom = String::from("<!doctype html><title>static</title>");
+    custom.push_str(&" ".repeat(generated.len() - custom.len() - 6));
+    custom.push_str("</x>  ");
+    assert_eq!(custom.len(), generated.len());
+
+    fs::create_dir_all(root.join("static")).unwrap();
+    fs::write(root.join("static/index.html"), &custom).unwrap();
+    // Force the page to be rendered again, so the copy races a fresh write of
+    // the same length rather than an older one.
+    fs::remove_dir_all(root.join("dist")).unwrap();
+    build_incremental(&root);
+
+    assert_eq!(
+        text(&root.join("dist/index.html")),
+        custom,
+        "the rendered home page replaced a same-length static override"
+    );
+}
+
+#[test]
+fn a_date_that_is_not_a_date_is_an_error() {
+    let root = fixture("bad-date");
+    fs::write(
+        root.join("content/about.md"),
+        "+++\ntitle = \"About\"\ndate = \"yesterday\"\n+++\n\nBody.\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("invalid date \"yesterday\""), "{err}");
+    assert!(err.contains("about.md"), "{err}");
+}
+
+#[test]
+fn a_base_url_without_a_scheme_is_an_error() {
+    let root = fixture("bad-base-url");
+    fs::write(
+        root.join("agno.toml"),
+        "title = \"Test Site\"\nbase_url = \"example.com\"\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("base_url must be an absolute"), "{err}");
+}
