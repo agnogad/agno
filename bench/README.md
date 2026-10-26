@@ -14,6 +14,30 @@ For a quick single scenario:
 python3 bench/run.py --count 1000 --runs 5 --profile code
 ```
 
+## Comparing two builds
+
+`suite.py` measures one generator at a time, so a machine that drifts during
+the run favours whoever was measured in the quiet window. `ab.py` is the tool
+for a claim like "0.3.7 is faster than 0.3.6": it interleaves the two binaries
+on one site, round-robin, and adds a third series that runs the first binary
+again as a control.
+
+```sh
+python3 bench/ab.py --a old/agno --b new/agno --count 1000 --profile code
+python3 bench/ab.py --a target/release/agno --b target/release/agno   # calibrate
+```
+
+The control is the point. Two series of the *same* binary differ by whatever
+the machine was doing, so their ratio is the noise floor, measured rather than
+assumed. A result only counts if it beats that floor on both the median and the
+fastest run — cold builds are right-skewed, since interference can add time but
+never remove it, so the fastest sample is the least polluted one. With the same
+binary on both sides the tool refuses to declare a winner and reports the floor
+instead.
+
+On the 12-core laptop used for the tables in the root README, that floor is
+about 15% on a loaded machine. Effects below it need an idle box, not more runs.
+
 ## Search index cost
 
 `search_index.py` runs the same corpus with `search_index` off and on. It

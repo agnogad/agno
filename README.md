@@ -101,35 +101,49 @@ from a laptop.
 
 #### Linux: gnu or musl
 
-There are two Linux archives, and they differ in more than libc.
+Two archives, and they differ in libc, allocator and regex engine. 3,000 posts,
+twelve threads:
 
 | | `x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-musl` |
 |---|---|---|
+| no code | 139 ms / 38 MB | 134 ms / 118 MB |
+| one code block per post | 219 ms / 41 MB | 439 ms / 155 MB |
+| three code blocks per post | 443 ms / 51 MB | 942 ms / 219 MB |
 | runs on | glibc 2.34+ (Ubuntu 22.04, Debian 12, RHEL 9) | any x86_64 Linux, fully static |
-| 1000 posts, no code, 12 threads | 0.06 s / 19 MB | 0.08 s / 80 MB |
-| 1000 posts with code, 12 threads | 0.09 s / 19 MB | 0.19 s / 117 MB |
+| allocator | system | mimalloc |
 | regex engine | Oniguruma (C) | fancy-regex (Rust) |
 
-Take **gnu** unless it will not start: it is about twice as fast on a site with
-code blocks and uses a fraction of the memory. Take **musl** for an Alpine or
-`scratch` container, or for anything older than glibc 2.34, where the gnu
-archive fails at startup with `GLIBC_2.34 not found`.
+Take **gnu** unless it will not start: on a site with code it is twice as fast
+and uses a quarter of the memory. Take **musl** for an Alpine or `scratch`
+container, or for anything older than glibc 2.34, where the gnu archive fails
+at startup with `GLIBC_2.34 not found`.
 
-They use different regex engines because Oniguruma does not scale. It
-serialises on a global lock that glibc's mutex absorbs and musl's does not: with
-it, the static build took 0.21 s on one thread and 0.72 s on twelve, more cores
-and less throughput. Swapping to syntect's pure-Rust engine fixes that — twelve
-threads become faster than one — at the cost of roughly 2× the highlighting
-work, which is a good trade only where the alternative is not scaling. The
-rendered HTML is byte-identical either way; that was checked by diffing a
-300-post site built with each engine.
+Two separate problems forced the differences, and both are worth knowing if you
+build from source:
 
-The musl build also uses mimalloc, because musl's allocator has the same
-problem in a milder form, and that is where its memory figures come from.
+**musl's allocator does not scale.** Not in the highlighting path, just under
+contention — so the static build uses mimalloc. That is where most of its
+memory goes: 118 MB against 38 MB with no code in the site.
 
-Medians of seven interleaved cold builds on a 12-core laptop. The machine is
-not quiet, so read these as ratios: two runs of the same binary differed by up
-to 35%.
+**Oniguruma serialises on a global lock** that glibc's adaptive mutex absorbs
+and musl's does not. With it, the 0.3.6 static build took 2.9 s on one thread
+and 9.2 s on twelve — more cores, less throughput. The static archive therefore
+builds on syntect's pure-Rust engine, where twelve threads beat one.
+
+That fix has a price, and it is memory: fancy-regex keeps compiled state per
+thread, so the static build's footprint grows with the number of code blocks
+(118 → 219 MB). The 0.3.6 figure looked better partly because it was
+serialised — with one thread doing the highlighting, only one thread's state was
+ever live. It is also about 2× the highlighting work: 5.0 s at one thread
+against 2.9 s for Oniguruma. Twelve threads more than repay that, one does not.
+
+The rendered HTML is byte-identical either way; that was checked by diffing all
+307 pages of a 300-post site built by each released binary.
+
+Figures come from `bench/ab.py`, which interleaves the two binaries and runs a
+control of the same binary twice. On this laptop that control moves by up to
+15%, so read the table as ratios and treat anything smaller than that as noise
+— in particular, gnu and musl are the same speed on a site with no code.
 
 ### Install from crates.io
 
