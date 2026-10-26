@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} · {{ config.title }}{% endblock %}
+{% block content %}
+<article>
+  <h1>{{ page.title }}</h1>
+  {% if page.date %}
+  <p class="meta">
+    <time datetime="{{ page.date }}">{{ page.date }}</time>
+    {% for tag in page.taxonomies.tags %} · <a href="{{ get_taxonomy_url(kind="tags", name=tag) }}">{{ tag }}</a>{% endfor %}
+  </p>
+  {% endif %}
+  <div class="content">{{ page.content | safe }}</div>
+</article>
+{% endblock %}

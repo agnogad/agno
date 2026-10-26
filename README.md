@@ -53,9 +53,10 @@ marketing pages.
 - **Comfortable authoring.** TOML or YAML frontmatter, optional templates, and
   a working site from `agno new` in seconds.
 
-Benchmarked against Hugo and Astro on the same corpus, agno builds **3.9–12.8×
-faster than Hugo** and **16.7–185× faster than Astro** on cold builds. See
-[Benchmarks](#benchmarks) for numbers, methodology, and caveats.
+Benchmarked against Hugo, Zola, and Astro on the same corpus, agno builds
+**3.9–12.8× faster than Hugo**, **2.3–5.7× faster than Zola**, and
+**16.7–185× faster than Astro** on cold builds, and 17–48× faster than Zola on
+rebuilds. See [Benchmarks](#benchmarks) for numbers, methodology, and caveats.
 
 ## Installation
 
@@ -352,6 +353,33 @@ pages/s for Hugo. The full matrix, raw samples, and reproduction steps are in
 > **Report versions:** agno 0.1.0, Hugo 0.168.0, Astro 7.4.2. The current
 > release is 0.3.2; rerun [`bench/suite.py`](bench/suite.py) to measure your own
 > machine.
+
+### Zola
+
+Zola is the closest Rust neighbour, so it gets its own run on the same corpus
+with equivalent templates, tag pages, a feed, a sitemap and syntax
+highlighting. Medians of 7 interleaved runs on the machine above, agno 0.3.2 +
+this branch against Zola 0.23.6:
+
+| Posts | Profile | Cold build | | Rebuild | |
+| ---: | --- | ---: | --- | ---: | --- |
+| 1,000 | plain | **100 ms** / 233 ms | 2.3× | **21 ms** / 353 ms | 17× |
+| 1,000 | code | **124 ms** / 433 ms | 3.5× | **30 ms** / 546 ms | 18× |
+| 1,000 | heavy | **227 ms** / 1,285 ms | 5.7× | **32 ms** / 1,318 ms | 41× |
+| 3,000 | heavy | **608 ms** / 2,389 ms | 3.9× | **85 ms** / 2,764 ms | 32× |
+| 10,000 | code | **1,304 ms** / 3,405 ms | 2.6× | **187 ms** / 4,990 ms | 27× |
+
+Zola has no incremental mode: `zola build` deletes the output directory and
+renders everything, so its rebuild costs as much as a cold build. agno keeps
+fingerprints per page and rewrites only what changed. Peak RSS at 1,000
+posts/code is 21 MB against 76 MB, and the binary is 4.3 MB against 50.8 MB.
+
+Method, single-edit numbers, and caveats: [`bench/ZOLA.md`](bench/ZOLA.md).
+Reproduce with:
+
+```sh
+python3 bench/zola_compare.py --count 1000 --profile code --runs 5
+```
 
 ### Search index cost (agno 0.2.0)
 

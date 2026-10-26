@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ section.title }} · {{ config.title }}{% endblock %}
+{% block content %}
+<h1>{{ section.title }}</h1>
+{% if section.description %}<p class="meta">{{ section.description }}</p>{% endif %}
+<div class="content">{{ section.content | safe }}</div>
+<ul class="post-list">
+  {% for item in section.pages %}
+  <li>
+    <a href="{{ item.permalink }}">{{ item.title }}</a>
+    {% if item.date %}<time datetime="{{ item.date }}">{{ item.date }}</time>{% endif %}
+    {% if item.description %}<p>{{ item.description }}</p>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

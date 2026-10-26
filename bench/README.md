@@ -36,6 +36,20 @@ rendered when the listing is written, so this is the corpus that shows it.
 python3 bench/sections.py --sections 300 --per-section 5 --runs 7
 ```
 
+## Zola comparison
+
+`zola_compare.py` builds the same corpus twice — once for agno, once for Zola —
+and reports cold, rebuild and single-edit times plus peak RSS and startup. Zola
+only reads TOML frontmatter, so the generator's YAML is converted on the way in;
+the Markdown bodies stay byte-identical.
+
+```sh
+python3 bench/zola_compare.py --count 1000 --profile code --runs 5
+```
+
+Set `ZOLA_BIN` if `zola` is not on `PATH`. Results and caveats:
+[`ZOLA.md`](ZOLA.md).
+
 ## Corpus
 
 `gen.py` writes N posts (YAML frontmatter, tags, deterministic prose) into each
@@ -49,8 +63,8 @@ project's content directory:
 
 ## Fixtures
 
-- `hugo/` and `astro/` are minimal projects with layouts equivalent to the
-  embedded agno theme: single page, list, home, 404, stylesheet.
+- `hugo/`, `zola/` and `astro/` are minimal projects with layouts equivalent to
+  the embedded agno theme: single page, list, home, 404, stylesheet.
 - `run.py` prepares all three sites under `work/` (gitignored). Astro
   dependencies are installed once with `npm install`.
 - agno highlights code with syntect/Oniguruma; Hugo uses Chroma. Both do real
