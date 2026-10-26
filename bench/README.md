@@ -35,8 +35,10 @@ never remove it, so the fastest sample is the least polluted one. With the same
 binary on both sides the tool refuses to declare a winner and reports the floor
 instead.
 
-On the 12-core laptop used for the tables in the root README, that floor is
-about 15% on a loaded machine. Effects below it need an idle box, not more runs.
+On the 12-core laptop used for the tables in the root README, that floor ranges
+from 2% to 15% depending on what else the machine is doing — which is why the
+README quotes speed as a ratio and leaves the absolute times out. Effects below
+the floor need an idle box, not more runs.
 
 ## Search index cost
 

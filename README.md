@@ -102,48 +102,55 @@ from a laptop.
 #### Linux: gnu or musl
 
 Two archives, and they differ in libc, allocator and regex engine. 3,000 posts,
-twelve threads:
+twelve threads, speed relative to gnu:
 
 | | `x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-musl` |
 |---|---|---|
-| no code | 139 ms / 38 MB | 134 ms / 118 MB |
-| one code block per post | 219 ms / 41 MB | 439 ms / 155 MB |
-| three code blocks per post | 443 ms / 51 MB | 942 ms / 219 MB |
+| no code | 1.0×, 38 MB | 1.2–1.3× slower, 69–120 MB |
+| one code block per post | 1.0×, 41 MB | 1.5–1.6× slower, 94–159 MB |
+| three code blocks per post | 1.0×, 51 MB | 1.7–1.8× slower, 160–226 MB |
 | runs on | glibc 2.34+ (Ubuntu 22.04, Debian 12, RHEL 9) | any x86_64 Linux, fully static |
 | allocator | system | mimalloc |
 | regex engine | Oniguruma (C) | fancy-regex (Rust) |
 
-Take **gnu** unless it will not start: on a site with code it is twice as fast
-and uses a quarter of the memory. Take **musl** for an Alpine or `scratch`
-container, or for anything older than glibc 2.34, where the gnu archive fails
-at startup with `GLIBC_2.34 not found`.
+Take **gnu** unless it will not start: it is faster on every site, code or not,
+and uses between a quarter and a half of the memory. Take **musl** for an Alpine
+or `scratch` container, or for anything older than glibc 2.34, where the gnu
+archive fails at startup with `GLIBC_2.34 not found`.
 
 Two separate problems forced the differences, and both are worth knowing if you
 build from source:
 
 **musl's allocator does not scale under contention.** Not specific to
 highlighting — plain pages suffer too — so the static build uses mimalloc. That
-is where most of its memory goes: 118 MB against 38 MB with no code in the site.
+is where most of its memory goes: 69–120 MB against 38 MB with no code in the
+site.
 
 **Oniguruma serialises on a global lock** that glibc's adaptive mutex absorbs
-and musl's does not. With it, the 0.3.6 static build took 2.9 s on one thread
-and 9.2 s on twelve — more cores, less throughput. The static archive therefore
-builds on syntect's pure-Rust engine, where twelve threads beat one.
+and musl's does not. With it, the 0.3.6 static build took about three times as
+long on twelve threads as on one — more cores, less throughput. The static
+archive therefore builds on syntect's pure-Rust engine, where twelve threads
+beat one.
 
 That fix has a price, and it is memory: fancy-regex keeps compiled state per
-thread, so the static build's footprint grows with the number of code blocks
-(118 → 219 MB). The 0.3.6 figure looked better partly because it was
-serialised — with one thread doing the highlighting, only one thread's state was
-ever live. It is also about 2× the highlighting work: 5.0 s at one thread
-against 2.9 s for Oniguruma. Twelve threads more than repay that, one does not.
+thread, so the static build's footprint grows with the number of code blocks,
+from 69–120 MB without code to 160–226 MB with three blocks per post. The 0.3.6
+figure looked better partly because it was serialised — with one thread doing
+the highlighting, only one thread's state was ever live. It is also about 1.7×
+the highlighting work at one thread, which twelve threads more than repay and
+one does not.
+
+The ranges are real, not hedging: mimalloc defers purging, so the same static
+build measured 94 MB in one session and 159 MB in another. gnu stays within 4%
+of itself.
 
 The rendered HTML is byte-identical either way; that was checked by diffing all
 307 pages of a 300-post site built by each released binary.
 
 Figures come from `bench/ab.py`, which interleaves the two binaries and runs a
-control of the same binary twice. On this laptop that control moves by up to
-15%, so read the table as ratios and treat anything smaller than that as noise
-— in particular, gnu and musl are the same speed on a site with no code.
+control of the same binary twice. That control moved by 2–5% here, so the speed
+ratios are solid; the absolute times are not, and are left out for that reason —
+the same build measured 139 ms and 358 ms in two sessions an hour apart.
 
 ### Install from crates.io
 
