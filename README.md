@@ -365,7 +365,8 @@ measure the disk instead of the generator.
 Zola is the closest Rust neighbour, so it also gets a head-to-head run: the
 same corpus built twice, with equivalent templates, tag pages, a feed, a
 sitemap and syntax highlighting, and the two generators alternating inside every
-scenario so a load spike hits both. Medians of 7 runs on the machine above,
+scenario so a load spike hits both. Medians of 7 runs on the machine above —
+a separate interleaved run, so it differs from the matrix by a few percent —
 agno 0.3.2 against Zola 0.23.6:
 
 | Posts | Profile | Cold build | | Rebuild | |
