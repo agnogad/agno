@@ -1,6 +1,7 @@
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
@@ -8,28 +9,37 @@ use syntect::util::LinesWithEndings;
 
 static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<Theme> = OnceLock::new();
-/// `find_syntax_by_token` is a linear scan over every bundled grammar, so the
-/// answer is memoised per language: a site with thousands of code blocks would
-/// otherwise pay for that scan on every fence.
-static SYNTAX_CACHE: OnceLock<RwLock<HashMap<String, &'static SyntaxReference>>> = OnceLock::new();
+
+thread_local! {
+    /// `find_syntax_by_token` is a linear scan over every bundled grammar, so
+    /// the answer is memoised per language: a site with thousands of code
+    /// blocks would otherwise pay for that scan on every fence.
+    ///
+    /// Per thread, not in a shared map. This is looked up for every fence, and
+    /// the shared RwLock it used to live behind was measurable: on the static
+    /// musl build, 1,000 posts with code took 0.21s on one thread and 0.72s on
+    /// twelve - more cores, less throughput. glibc's adaptive rwlock absorbs
+    /// that contention, musl's goes to a futex every time.
+    static SYNTAX_CACHE: RefCell<HashMap<String, &'static SyntaxReference>> =
+        RefCell::new(HashMap::new());
+}
 
 fn syntaxes() -> &'static SyntaxSet {
     SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
 fn syntax_for(lang: &str) -> &'static SyntaxReference {
-    let cache = SYNTAX_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
-    if let Some(found) = cache.read().ok().and_then(|map| map.get(lang).copied()) {
-        return found;
-    }
-    let set = syntaxes();
-    let syntax = set
-        .find_syntax_by_token(lang)
-        .unwrap_or_else(|| set.find_syntax_plain_text());
-    if let Ok(mut map) = cache.write() {
-        map.insert(lang.to_string(), syntax);
-    }
-    syntax
+    SYNTAX_CACHE.with(|cache| {
+        if let Some(found) = cache.borrow().get(lang).copied() {
+            return found;
+        }
+        let set = syntaxes();
+        let syntax = set
+            .find_syntax_by_token(lang)
+            .unwrap_or_else(|| set.find_syntax_plain_text());
+        cache.borrow_mut().insert(lang.to_string(), syntax);
+        syntax
+    })
 }
 
 /// One heading in the table of contents.

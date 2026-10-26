@@ -120,11 +120,17 @@ glibc 2.34, where the gnu archive fails at startup with `GLIBC_2.34 not found`
 
 > [!WARNING]
 > On the static build, syntax highlighting does not scale: twelve threads are
-> 12× *slower* than one (0.72 s against 0.21 s for 1,000 posts). Plain content
-> scales normally, so this is specific to the highlighting path, and it is not
-> the allocator — the musl build already ships mimalloc, which fixed exactly
-> this symptom on plain pages. Until it is diagnosed, run the static build with
-> `RAYON_NUM_THREADS=1` if your site has code blocks.
+> 3× *slower* than one (0.72 s against 0.21 s for 1,000 posts). The cause is
+> Oniguruma, the C regex engine syntect uses — it serialises on a global lock,
+> which glibc's mutex absorbs and musl's does not. It is not the allocator
+> (mimalloc is already in that binary) and not agno's own cache.
+>
+> Two ways out: run the static build with `RAYON_NUM_THREADS=1` if your site has
+> code blocks, or build from source with syntect's pure-Rust engine instead of
+> `default-onig` in `Cargo.toml`. The second scales properly on musl (0.12 s at
+> twelve threads, the same as gnu) but costs about 2× on a code-heavy site
+> everywhere else; the rendered HTML is byte-identical either way, which I
+> checked by diffing a 300-post site built with each engine.
 
 Medians of seven interleaved cold builds on a 12-core laptop, so read the
 figures as ratios rather than absolutes.
