@@ -4,7 +4,7 @@
 <ul class="post-list">
   {% for item in pages %}
   <li>
-    <a href="{{ item.url }}">{{ item.title }}</a>
+    <a href="{{ item.url|url }}">{{ item.title }}</a>
     {% if item.date %}<time datetime="{{ item.datetime }}">{{ item.date }}</time>{% endif %}
     {% if item.summary %}<p>{{ item.summary }}</p>{% endif %}
   </li>

@@ -81,6 +81,43 @@ fn builds_pages_lists_feeds_and_taxonomies() {
 }
 
 #[test]
+fn generated_links_are_not_slash_escaped() {
+    let root = fixture("escaping");
+    build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap();
+
+    for name in [
+        "dist/index.html",
+        "dist/blog/index.html",
+        "dist/blog/hello/index.html",
+        "dist/tags/rust/index.html",
+        "dist/tags/index.html",
+        "dist/404.html",
+    ] {
+        let html = text(&root.join(name));
+        assert!(
+            !html.contains("&#x2f;"),
+            "{name} still escapes slashes in links"
+        );
+    }
+
+    let post = text(&root.join("dist/blog/hello/index.html"));
+    assert!(post.contains(r#"<link rel="canonical" href="https://example.com/blog/hello/">"#));
+    assert!(post.contains(r#"<a href="/tags/rust/">"#));
+
+    let index = text(&root.join("dist/index.html"));
+    assert!(index.contains(r#"<a href="/blog/hello/">Hello</a>"#));
+    assert!(index.contains(r#"<a href="/about/">About</a>"#));
+}
+
+#[test]
 fn user_templates_override_embedded_defaults() {
     let root = fixture("override");
     fs::create_dir_all(root.join("templates")).unwrap();

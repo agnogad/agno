@@ -6,7 +6,7 @@
 <ul class="post-list">
   {% for item in pages %}
   <li>
-    <a href="{{ item.url }}">{{ item.title }}</a>
+    <a href="{{ item.url|url }}">{{ item.title }}</a>
     {% if item.date %}<time datetime="{{ item.datetime }}">{{ item.date }}</time>{% endif %}
     {% if item.summary %}<p>{{ item.summary }}</p>{% endif %}
   </li>
@@ -14,9 +14,9 @@
 </ul>
 {% if page.paginator %}
 <nav class="pagination">
-  {% if page.paginator.prev_url %}<a rel="prev" href="{{ page.paginator.prev_url }}">← Newer</a>{% else %}<span></span>{% endif %}
+  {% if page.paginator.prev_url %}<a rel="prev" href="{{ page.paginator.prev_url|url }}">← Newer</a>{% else %}<span></span>{% endif %}
   <span class="pagination-info">{{ page.paginator.current }} / {{ page.paginator.total }}</span>
-  {% if page.paginator.next_url %}<a rel="next" href="{{ page.paginator.next_url }}">Older →</a>{% else %}<span></span>{% endif %}
+  {% if page.paginator.next_url %}<a rel="next" href="{{ page.paginator.next_url|url }}">Older →</a>{% else %}<span></span>{% endif %}
 </nav>
 {% endif %}
 {% endblock %}
