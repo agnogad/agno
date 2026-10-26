@@ -1,6 +1,6 @@
 [package]
 name = "agno"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 rust-version = "1.88"
 description = "A fast, content-first static site generator"
@@ -39,11 +39,16 @@ tiny_http = "0.12"
 toml = "1"
 walkdir = "2"
 
-# The global allocator, on every platform. Measured on a 3000-page site:
-# glibc 0.283s vs mimalloc 0.230s on one thread, 0.170s vs 0.135s on twelve,
-# and it is what makes the musl build usable at all - musl's malloc takes a
-# global lock, so that build went from 0.40s on one thread to 0.91s on twelve
-# without it.
+# Only the musl build. There it is not tuning: musl's malloc takes a global
+# lock, so the static build went 0.40s on one thread to 1.07s on twelve, and
+# mimalloc brings that to 0.14s.
+#
+# It is not used elsewhere because it costs 3-5x the peak RSS for no reliable
+# speed: measured against glibc on the same fixtures, 1000 posts/code was 12%
+# *slower* (60ms vs 54ms, 93MB vs 19MB) and 3000 posts/heavy 8% faster
+# (292ms vs 317ms, 141MB vs 49MB). Low memory is one of agno's claims, so the
+# gnu, macOS and Windows builds keep the system allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
 [profile.release]

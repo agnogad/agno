@@ -6,11 +6,12 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-// A building site is allocation-heavy - every page, every parsed frontmatter,
-// every rendered template - and mimalloc beats glibc's malloc by ~20% on the
-// 3000-page benchmark. On musl it is not a tuning choice but the difference
-// between scaling and not: musl's allocator takes a global lock, and the static
-// build went from 0.40s on one thread to 0.91s on twelve without this.
+// The musl build gets mimalloc because musl's malloc takes a global lock, and
+// that build is where it shows: 1000 plain pages went from 1.07s to 47ms on
+// twelve threads. It does *not* fix everything - see the note about syntax
+// highlighting in the README - and it costs peak RSS, so the gnu, macOS and
+// Windows builds keep their system allocator.
+#[cfg(target_env = "musl")]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

@@ -65,9 +65,8 @@ and caveats.
 
 - Rust **1.88+** (edition 2024; `time` and `plist` need 1.88)
 - A C toolchain at build time (`cc`, MSVC, or Xcode command-line tools). The
-  syntax highlighter bundles Oniguruma and the allocator is mimalloc, both of
-  which are C; they are compiled into the binary, so there is no shared library
-  to install alongside it.
+  syntax highlighter bundles Oniguruma, which is C; it is compiled into the
+  binary, so there is no shared library to install alongside it.
 
 > [!NOTE]
 > agno is published on [crates.io](https://crates.io/crates/agno), and every
@@ -102,25 +101,33 @@ from a laptop.
 
 #### Linux: gnu or musl
 
-There are two Linux archives; pick on libc first, then on speed.
+There are two Linux archives, and they are not equivalent.
 
 | | `x86_64-unknown-linux-gnu` | `x86_64-unknown-linux-musl` |
 |---|---|---|
 | runs on | glibc 2.34+ (Ubuntu 22.04, Debian 12, RHEL 9) | any x86_64 Linux, fully static |
-| 3000 pages, 12 threads | 0.19 s | 0.25 s |
-| 3000 pages, 1 thread | 0.32 s | 0.35 s |
+| 3000 posts, no code, 12 threads | 0.10 s / 38 MB | 0.11 s / 118 MB |
+| 3000 posts, no code, 1 thread | 0.23 s / 23 MB | 0.27 s / 55 MB |
+| 1000 posts with code, 12 threads | 0.06 s / 20 MB | **0.72 s** / 89 MB |
+| 1000 posts with code, 1 thread | 0.16 s / 19 MB | 0.21 s / 39 MB |
 
-Take **gnu** if your distribution is new enough — it is roughly 20% ahead.
+Take **gnu** unless it will not start. It is the only one of the two that
+scales on a site with syntax highlighting, and it uses a third of the memory.
+
 Take **musl** for an Alpine or `scratch` container, or for anything older than
-glibc 2.34, where the gnu archive fails at startup with
-`GLIBC_2.34 not found`.
+glibc 2.34, where the gnu archive fails at startup with `GLIBC_2.34 not found`
+— but read the next paragraph first.
 
-Both ship mimalloc rather than the system allocator, which matters most on
-musl: musl's malloc takes a global lock, so without it the static build got
-*slower* as you gave it cores — 1.07 s on twelve threads against 0.14 s now.
+> [!WARNING]
+> On the static build, syntax highlighting does not scale: twelve threads are
+> 12× *slower* than one (0.72 s against 0.21 s for 1,000 posts). Plain content
+> scales normally, so this is specific to the highlighting path, and it is not
+> the allocator — the musl build already ships mimalloc, which fixed exactly
+> this symptom on plain pages. Until it is diagnosed, run the static build with
+> `RAYON_NUM_THREADS=1` if your site has code blocks.
 
-Medians of nine interleaved cold builds of a 3000-page site on a 12-core
-laptop, so read the figures as ratios rather than absolutes.
+Medians of seven interleaved cold builds on a 12-core laptop, so read the
+figures as ratios rather than absolutes.
 
 ### Install from crates.io
 
@@ -146,7 +153,7 @@ cargo install --path .
 
 ```sh
 agno --version
-# agno 0.3.5
+# agno 0.3.6
 ```
 
 ## Quick start
