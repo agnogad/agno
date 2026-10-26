@@ -65,8 +65,8 @@ and caveats.
 
 - Rust **1.88+** (edition 2024; `time` and `plist` need 1.88)
 - A C toolchain at build time (`cc`, MSVC, or Xcode command-line tools). The
-  syntax highlighter bundles Oniguruma; the resulting binary is still fully
-  static at runtime.
+  syntax highlighter bundles Oniguruma, which is C; it is compiled into the
+  binary, so there is no shared library to install alongside it.
 
 > [!NOTE]
 > agno is published on [crates.io](https://crates.io/crates/agno), and every
@@ -91,6 +91,11 @@ Swap `x86_64-unknown-linux-gnu` for `aarch64-apple-darwin`,
 `x86_64-apple-darwin` or `x86_64-pc-windows-msvc` (the Windows archive is a
 `.zip`). The archives are built by CI on each platform, not cross-compiled
 from a laptop.
+
+The Linux binary is linked against glibc **2.34 or newer** — Ubuntu 22.04,
+Debian 12, RHEL 9 and anything later. On an older distribution (Ubuntu 20.04,
+Debian 11) it will fail at startup with a `GLIBC_2.34 not found` message;
+install from crates.io there, which builds against the system toolchain.
 
 ### Install from crates.io
 
