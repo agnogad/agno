@@ -4,8 +4,11 @@
 [![crates.io](https://img.shields.io/crates/v/agno.svg)](https://crates.io/crates/agno)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
+[![Documentation](https://img.shields.io/badge/docs-live-2ea043)](https://agno-docs.pages.dev)
 
 **A fast, content-first static site generator written in Rust.**
+
+**Documentation:** <https://agno-docs.pages.dev>
 
 agno turns Markdown and Jinja-style templates into a static site from a single
 4.2 MB binary — no Node.js, no bundler, and no plugin runtime. It is built for
