@@ -1,0 +1,20 @@
+{{#var sorted = $utils.sortByDate($section)}}
+<div class="blog-index">
+<h1>{{ $page.title }}</h1>
+<p class="lead">{{ $page.summary }}</p>
+{{#each sorted as (p)}}
+{{#if p.path !== $page.path}}
+<article class="post-preview">
+	<h2><a href="{{ p.path }}">{{ p.title }}</a></h2>
+	<p class="meta">
+		{{#if p.draft}}<span class="draft">Draft</span>{{/if}}
+		<time datetime="{{ p.params.date }}">{{ $utils.humanDate(p.params.date) }}</time>
+		{{#if p.tags.length}}
+		<span class="tags">{{#each p.tags as (t)}}<span class="tag">{{ t }}</span>{{/each}}</span>
+		{{/if}}
+	</p>
+	<p class="summary">{{ p.summary }}</p>
+</article>
+{{/if}}
+{{/each}}
+</div>

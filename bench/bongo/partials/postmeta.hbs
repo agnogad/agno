@@ -1,0 +1,8 @@
+{{#expect date, tags, draft }}
+<p class="meta">
+	{{#if draft}}<span class="draft">Draft</span>{{/if}}
+	<time datetime="{{ date }}">{{ $utils.humanDate(date) }}</time>
+	{{#if tags.length}}
+	<span class="tags">{{#each tags as (t)}}<span class="tag">{{ t }}</span>{{/each}}</span>
+	{{/if}}
+</p>

@@ -62,6 +62,20 @@ rendered when the listing is written, so this is the corpus that shows it.
 python3 bench/sections.py --sections 300 --per-section 5 --runs 7
 ```
 
+## bongo comparison
+
+bongo is a TypeScript generator that runs on Node or Bun. `bongo_compare.py`
+builds the same corpus with both tools, alternating them inside every scenario,
+and reports cold, no-change and single-edit builds plus peak RSS and output
+size. The bongo fixture is in `bongo/`; its dependencies install on first run.
+
+```sh
+python3 bench/bongo_compare.py --count 1000 --profile code --runs 5
+python3 bench/bongo_compare.py --count 10000 --runs 3 --highlighter sugarhigh --runtime bun
+```
+
+Results and caveats: [`BONGO.md`](BONGO.md).
+
 ## Zola comparison
 
 Zola is part of the matrix above. `zola_compare.py` is the focused head-to-head:

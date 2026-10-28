@@ -56,10 +56,10 @@ marketing pages.
 - **Comfortable authoring.** TOML or YAML frontmatter, optional templates, and
   a working site from `agno new` in seconds.
 
-Benchmarked against Hugo, Zola, and Astro on the same corpus, agno builds
+Benchmarked against Hugo, Zola, Astro, and bongo on the same corpus, agno builds
 **3.3–9.3× faster than Hugo**, **1.9–14× faster than Zola** (2–6× from 1,000
-posts up), and **12–161× faster than Astro** on cold builds, and 13–16× faster
-than Zola on rebuilds. See [Benchmarks](#benchmarks) for numbers, methodology,
+posts up), **12–161× faster than Astro**, and **4.1–8.4× faster than bongo** on
+cold builds; it rebuilds 13–16× faster than Zola and 4.2–17× faster than bongo. See [Benchmarks](#benchmarks) for numbers, methodology,
 and caveats.
 
 ## Installation
@@ -525,6 +525,40 @@ Reproduce with:
 
 ```sh
 python3 bench/zola_compare.py --count 1000 --profile code --runs 5
+```
+
+### bongo
+
+bongo is a TypeScript generator that runs on Node or Bun and bundles with
+Rolldown and LightningCSS. Same corpus, same interleaved method: the stock
+`agno new` and `bun create bongo` scaffolds, agno 0.3.7 against bongo 1.2.0,
+medians of 5 runs at 1,000 posts and 3 at 10,000.
+
+bongo is measured twice: with the scaffold's defaults (`bongo build` on Node,
+Shiki highlighting) and with its fastest setup here (`bun --bun run build`,
+Sugar High). The two runtimes cannot share a site, because bongo keys its build
+cache on the runtime.
+
+| Posts | agno cold | bongo cold (Node, Shiki) | bongo cold (Bun, Sugar High) | agno rebuild | bongo rebuild (Node, Shiki) | bongo rebuild (Bun, Sugar High) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | **129 ms** | 1,839 ms | 1,079 ms | **22 ms** | 581 ms | 381 ms |
+| 10,000 | **1,488 ms** | 10,903 ms | 6,172 ms | **225 ms** | 1,473 ms | 932 ms |
+
+That is **8.4× faster than bongo at 1,000 posts and 4.1× at 10,000** on cold
+builds, and 17× and 4.2× on rebuilds (a single edit costs the same as a no-op
+rebuild). Peak RSS at 10,000 posts/code is 114 MB against 666 MB on Node and
+329 MB on Bun; at 1,000 posts it is 22 MB against 266 MB and 192 MB. CLI
+startup is 2 ms against 58–65 ms.
+
+agno also writes slightly more per build (tag pages, RSS, `404.html`), so the
+gap is not a feature-parity artefact. bongo publishes 2.19 s for 10,000 pages on
+an M1 Max with twinkleplop; on this i5 the same corpus takes 6.17 s with bongo's
+best options. Method, single-edit table, and caveats:
+[`bench/BONGO.md`](bench/BONGO.md). Reproduce with:
+
+```sh
+python3 bench/bongo_compare.py --count 1000 --profile code --runs 5
+python3 bench/bongo_compare.py --count 10000 --runs 3 --highlighter sugarhigh --runtime bun
 ```
 
 ### Search index cost (agno 0.2.0)

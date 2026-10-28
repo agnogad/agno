@@ -1,0 +1,261 @@
+:root {
+	--fg: #0f172a;
+	--muted: #64748b;
+	--bg: #f8fafc;
+	--accent: #2563eb;
+	--rule: #e2e8f0;
+	--code-bg: #f1f5f9;
+	--draft: #b45309;
+	--draft-bg: #fef3c7;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--fg: #f1f5f9;
+		--muted: #94a3b8;
+		--bg: #0f172a;
+		--accent: #60a5fa;
+		--rule: #1e293b;
+		--code-bg: #1e293b;
+		--draft: #fbbf24;
+		--draft-bg: #422006;
+	}
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: 16px; }
+
+body {
+	margin: 0;
+	color: var(--fg);
+	background: var(--bg);
+	font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	line-height: 1.6;
+}
+
+/* ---- Layout shells ---- */
+
+header.site,
+footer.site {
+	max-width: 56rem;
+	margin: 0 auto;
+	padding: 1rem 1.5rem;
+}
+
+main {
+	max-width: 42rem;
+	margin: 0 auto;
+	padding: 2.5rem 1.5rem 4rem;
+}
+
+.blog-index {
+	max-width: 56rem;
+}
+
+/* ---- Site header / nav ---- */
+
+header.site {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	border-bottom: 1px solid var(--rule);
+}
+
+header.site a.brand {
+	color: inherit;
+	text-decoration: none;
+	font-weight: 700;
+	font-size: 1.05rem;
+	letter-spacing: -0.01em;
+}
+
+header.site nav a {
+	margin-left: 1.25rem;
+	color: var(--muted);
+	text-decoration: none;
+	font-size: 0.9rem;
+}
+
+header.site nav a:hover {
+	color: var(--accent);
+}
+
+/* ---- Typography ---- */
+
+h1, h2, h3, h4 {
+	line-height: 1.25;
+	letter-spacing: -0.015em;
+}
+
+h1 { font-size: 1.875rem; margin-top: 0; margin-bottom: 0.5rem; }
+h2 { font-size: 1.3rem; margin-top: 2rem; margin-bottom: 0.5rem; }
+h3 { font-size: 1.1rem; }
+
+p { margin-top: 0; margin-bottom: 1rem; }
+p.lead { font-size: 1.05rem; color: var(--muted); margin-bottom: 2rem; }
+
+a {
+	color: var(--accent);
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	text-decoration-thickness: 1px;
+}
+
+a:hover { text-decoration-thickness: 2px; }
+
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.25rem; }
+
+/* ---- Code ---- */
+
+code {
+	font-family: "SF Mono", Menlo, Consolas, monospace;
+	font-size: 0.88em;
+	background: var(--code-bg);
+	padding: 0.15em 0.35em;
+	border-radius: 4px;
+}
+
+pre {
+	background: var(--code-bg);
+	padding: 1.25rem;
+	border-radius: 6px;
+	overflow-x: auto;
+	margin-bottom: 1.5rem;
+	border: 1px solid var(--rule);
+}
+
+pre code {
+	background: none;
+	padding: 0;
+	font-size: 0.875em;
+}
+
+/* ---- Meta / tags ---- */
+
+.meta {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	color: var(--muted);
+	font-size: 0.875rem;
+	font-variant-numeric: tabular-nums;
+	margin-bottom: 1.75rem;
+}
+
+.tags {
+	display: inline-flex;
+	gap: 0.35rem;
+	flex-wrap: wrap;
+}
+
+.tags .tag {
+	display: inline-block;
+	padding: 0.15rem 0.5rem;
+	background: var(--code-bg);
+	border: 1px solid var(--rule);
+	border-radius: 4px;
+	font-size: 0.78rem;
+	color: var(--muted);
+	text-transform: lowercase;
+	font-variant-numeric: normal;
+}
+
+/* bongo dev shows drafts, which bongo build leaves out */
+.meta .draft {
+	padding: 0.15rem 0.5rem;
+	background: var(--draft-bg);
+	border: 1px solid var(--draft);
+	border-radius: 4px;
+	font-size: 0.72rem;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--draft);
+}
+
+/* ---- Blog index ---- */
+
+.blog-index h1 { margin-bottom: 0.25rem; }
+
+article.post-preview {
+	padding: 1.5rem 0;
+	border-bottom: 1px solid var(--rule);
+}
+
+article.post-preview:first-of-type { padding-top: 0.5rem; }
+
+article.post-preview h2 {
+	margin: 0 0 0.35rem;
+	font-size: 1.15rem;
+}
+
+article.post-preview h2 a {
+	color: inherit;
+	text-decoration: none;
+}
+
+article.post-preview h2 a:hover { color: var(--accent); }
+
+article.post-preview .meta { margin-bottom: 0.5rem; }
+
+article.post-preview p.summary {
+	margin: 0;
+	color: var(--muted);
+	font-size: 0.95rem;
+}
+
+/* ---- Single post ---- */
+
+article.post header { margin-bottom: 0.5rem; }
+article.post header h1 { margin-bottom: 0.5rem; }
+
+.post-body { margin-top: 0.5rem; }
+.post-body > *:last-child { margin-bottom: 0; }
+
+/* ---- Footer ---- */
+
+footer.site {
+	border-top: 1px solid var(--rule);
+	color: var(--muted);
+	font-size: 0.875rem;
+	display: flex;
+	gap: 1rem;
+	align-items: center;
+	margin-top: 2rem;
+}
+
+footer.site a {
+	color: var(--muted);
+}
+
+/* ---- Back to top button ---- */
+
+#back-to-top {
+	position: fixed;
+	bottom: 1.5rem;
+	right: 1.5rem;
+	padding: 0.4rem 0.75rem;
+	background: var(--bg);
+	border: 1px solid var(--rule);
+	border-radius: 6px;
+	color: var(--muted);
+	font-size: 0.8rem;
+	text-decoration: none;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.2s;
+	pointer-events: none;
+}
+
+#back-to-top.visible {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+#back-to-top:hover {
+	color: var(--fg);
+	border-color: var(--muted);
+}

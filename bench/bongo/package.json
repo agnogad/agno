@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "scripts": {
+    "dev": "bongo dev",
+    "build": "bongo build"
+  },
+  "devDependencies": {
+    "@bongo/markdown": "latest",
+    "@types/node": "^24",
+    "bongo": "npm:@bongo/bongo",
+    "shiki": "^4.0.2"
+  },
+  "dependencies": {
+    "sugar-high": "^2.6.4"
+  }
+}

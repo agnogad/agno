@@ -1,0 +1,107 @@
+{
+  "count": 1000,
+  "profile": "code",
+  "runs": 5,
+  "agno_version": "agno 0.3.7",
+  "bongo_version": "1.2.0",
+  "node": "v26.7.0",
+  "bun": "1.4.0",
+  "results": {
+    "agno": {
+      "cold": {
+        "min_ms": 127.5,
+        "median_ms": 140.5,
+        "rss_mb": 19.0,
+        "raw_ms": [
+          147.6,
+          138.8,
+          127.5,
+          140.5,
+          152.0
+        ]
+      },
+      "noop": {
+        "min_ms": 21.3,
+        "median_ms": 22.3,
+        "rss_mb": 18.8,
+        "raw_ms": [
+          22.8,
+          25.2,
+          21.3,
+          22.3,
+          21.6
+        ]
+      },
+      "edit": {
+        "min_ms": 21.9,
+        "median_ms": 22.5,
+        "rss_mb": 18.8,
+        "raw_ms": [
+          31.0,
+          22.1,
+          23.9,
+          21.9,
+          22.5
+        ]
+      },
+      "out_files": 1011,
+      "out_mb": 3.6,
+      "startup_ms": 1.9
+    },
+    "bongo": {
+      "cold": {
+        "min_ms": 1800.0,
+        "median_ms": 1839.2,
+        "rss_mb": 265.5,
+        "raw_ms": [
+          1915.7,
+          1800.0,
+          1839.2,
+          1873.2,
+          1832.4
+        ]
+      },
+      "noop": {
+        "min_ms": 565.8,
+        "median_ms": 581.4,
+        "rss_mb": 176.6,
+        "raw_ms": [
+          583.0,
+          581.4,
+          570.6,
+          565.8,
+          589.1
+        ]
+      },
+      "edit": {
+        "min_ms": 579.7,
+        "median_ms": 586.2,
+        "rss_mb": 178.4,
+        "raw_ms": [
+          644.5,
+          579.7,
+          597.4,
+          583.6,
+          586.2
+        ]
+      },
+      "out_files": 1009,
+      "out_mb": 3.3,
+      "startup_ms": 57.7
+    }
+  },
+  "ratios": {
+    "cold": {
+      "agno": 1.0,
+      "bongo": 0.08
+    },
+    "noop": {
+      "agno": 1.0,
+      "bongo": 0.04
+    },
+    "edit": {
+      "agno": 1.0,
+      "bongo": 0.04
+    }
+  }
+}

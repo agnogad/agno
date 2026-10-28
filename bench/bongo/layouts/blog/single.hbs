@@ -1,0 +1,9 @@
+<article class="post">
+	<header>
+		<h1>{{ $page.title }}</h1>
+		{{#partial src="postmeta" date=$page.params.date tags=$page.tags draft=$page.draft}}
+	</header>
+	<div class="post-body">
+		{{{ $page.content }}}
+	</div>
+</article>
