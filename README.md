@@ -1,5 +1,7 @@
 # agno
 
+![agno — a fast, content-first static site generator written in Rust](assets/banner/banner.gif)
+
 [![CI](https://github.com/agnogad/agno/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/agnogad/agno/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/agno.svg)](https://crates.io/crates/agno)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
