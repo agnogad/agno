@@ -228,6 +228,20 @@ pub fn load(cfg: &Config, drafts: Drafts) -> Result<Content> {
                 .unwrap_or_default();
             if is_markdown(&name) {
                 if is_index(&name) {
+                    // Two `_index` files in one directory used to be resolved
+                    // by readdir order, silently dropping one. Fail loudly.
+                    if let Some(previous) = index_paths.get(&rel_dir) {
+                        bail!(
+                            "duplicate section index in {}: {} and {}",
+                            if rel_dir.is_empty() {
+                                "content/"
+                            } else {
+                                &rel_dir
+                            },
+                            previous.display(),
+                            path.display()
+                        );
+                    }
                     index_paths.insert(rel_dir, path);
                 } else if !name.starts_with('_') {
                     page_paths.push(path);
@@ -490,7 +504,18 @@ fn load_page(
         .map(|(head, _)| head.to_string())
         .unwrap_or_default();
 
-    let (filename_date, stem_clean) = split_date_prefix(&file_stem);
+    // A bundle's metadata comes from its directory name, never the literal
+    // `index.md` inside it: `2024-05-01-photo/index.md` is the "photo" page.
+    let stem = if is_bundle_index {
+        parent
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("index")
+    } else {
+        file_stem.as_str()
+    };
+    let (filename_date, stem_clean) = split_date_prefix(stem);
 
     let date = field_date(&fm, "date", path)?.or_else(|| filename_date.and_then(parse_date));
     let updated = field_date(&fm, "updated", path)?;
@@ -503,22 +528,15 @@ fn load_page(
         u32::try_from(word_count.div_ceil(200)).unwrap_or(u32::MAX)
     };
 
-    let default_slug = if is_bundle_index {
-        parent
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("index")
-            .to_string()
-    } else {
-        stem_clean.to_string()
-    };
+    // Both regular pages and bundles take their default slug from the same
+    // date-stripped stem; for a bundle that is the directory name.
+    let default_slug = stem_clean;
 
     let slug = field_str(&fm, "slug")
         .map(|s| slugify(&s))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            let slug = slugify(&default_slug);
+            let slug = slugify(default_slug);
             if slug.is_empty() { "page".into() } else { slug }
         });
 

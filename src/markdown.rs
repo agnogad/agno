@@ -131,8 +131,12 @@ pub fn render(input: &str, highlight: bool) -> Rendered {
                     }
                 }
                 let text = heading_text(&inner);
+                // An explicit id comes from attacker-controlled Markdown, so
+                // it goes through the same slugify as a generated id. That
+                // keeps the `<hN id>` and the TOC `href` on one sanitized
+                // value instead of trusting the raw attribute.
                 let base = id
-                    .map(|id| id.to_string())
+                    .map(|id| crate::content::slugify(&id))
                     .filter(|id| !id.is_empty())
                     .unwrap_or_else(|| crate::content::slugify(&text));
                 let base = if base.is_empty() {
@@ -144,11 +148,20 @@ pub fn render(input: &str, highlight: bool) -> Rendered {
                 headings.push((level as u8, unique.clone(), text));
                 events.push(Event::Start(Tag::Heading {
                     level,
-                    id: Some(CowStr::Boxed(unique.into_boxed_str())),
+                    id: Some(CowStr::Boxed(unique.clone().into_boxed_str())),
                     classes,
                     attrs,
                 }));
                 events.extend(inner);
+                // A copyable permalink. It is added after the inner events, so
+                // `heading_text` never sees it and TOC labels stay clean.
+                events.push(Event::Html(CowStr::Boxed(
+                    format!(
+                        "<a class=\"heading-anchor\" href=\"#{}\">#</a>",
+                        escape_html(&unique)
+                    )
+                    .into_boxed_str(),
+                )));
                 events.push(Event::End(TagEnd::Heading(level)));
             }
             other => events.push(other),

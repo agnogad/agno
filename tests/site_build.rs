@@ -2012,3 +2012,106 @@ fn clean_reports_a_directory_it_cannot_empty() {
         "the test directory was emptied anyway"
     );
 }
+
+#[test]
+fn a_heading_id_with_a_quote_cannot_break_out_of_the_toc_link() {
+    let root = fixture("toc-xss");
+    fs::write(
+        root.join("content/blog/toc.md"),
+        r#"+++
+title = "Toc"
+date = 2024-01-01
++++
+
+## Hi {#x"onmouseover="alert(1)}
+
+Hi body.
+
+## Second
+
+Second body.
+"#,
+    )
+    .unwrap();
+
+    clean_build(&root);
+
+    let page = text(&root.join("dist/blog/toc/index.html"));
+    let h2_id = page
+        .split("<h2 id=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the first heading has an id");
+    assert!(
+        !page.contains("onmouseover="),
+        "the raw attribute leaked into the page: {page}"
+    );
+    assert!(
+        page.contains(&format!("<h2 id=\"{h2_id}\">")),
+        "heading id must be the sanitized one: {page}"
+    );
+    assert!(
+        page.contains(&format!("<a href=\"#{h2_id}\">Hi</a>")),
+        "the TOC link must use the same sanitized id with a clean label: {page}"
+    );
+    assert!(
+        page.contains(&format!(
+            "<a class=\"heading-anchor\" href=\"#{h2_id}\">#</a>"
+        )),
+        "missing heading permalink: {page}"
+    );
+}
+
+#[test]
+fn a_bundle_directory_with_a_date_prefix_gets_its_date_clean_url_and_title() {
+    let root = fixture("bundle-date-prefix");
+    fs::create_dir_all(root.join("content/blog/2024-05-01-photo")).unwrap();
+    fs::write(
+        root.join("content/blog/2024-05-01-photo/index.md"),
+        "Photo body.\n",
+    )
+    .unwrap();
+
+    clean_build(&root);
+
+    let page = text(&root.join("dist/blog/photo/index.html"));
+    assert!(page.contains("Photo body."), "{page}");
+    assert!(
+        page.contains("2024-05-01"),
+        "the date must come from the directory prefix: {page}"
+    );
+    assert!(
+        page.contains("<h1>Photo</h1>"),
+        "the title fallback must use the directory name: {page}"
+    );
+
+    let rss = text(&root.join("dist/rss.xml"));
+    assert!(
+        rss.contains("<link>https://example.com/blog/photo/</link>"),
+        "the bundle must be in the feed at its clean URL: {rss}"
+    );
+}
+
+#[test]
+fn two_index_files_in_one_directory_are_rejected() {
+    let root = fixture("duplicate-index");
+    fs::write(
+        root.join("content/_index.markdown"),
+        "+++\ntitle = \"Other home\"\n+++\n\nOther.\n",
+    )
+    .unwrap();
+
+    let err = build(
+        &root,
+        &BuildOptions {
+            drafts: false,
+            clean: true,
+            minify: false,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate section index"), "{err}");
+    assert!(err.contains("_index.md"), "{err}");
+    assert!(err.contains("_index.markdown"), "{err}");
+}
