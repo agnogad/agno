@@ -9,3 +9,6 @@ __pycache__/
 *.py[cod]
 /.workbuddy-ai
 /assets/banner/banner
+# Local promo renders — stay local, not shipped
+/assets/promo/
+/assets/promo-v2/

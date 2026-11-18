@@ -90,9 +90,13 @@ and put `agno` somewhere on your `PATH`:
 # resolve the newest tag, then fetch the archive for this platform
 tag=$(curl -sIL -o /dev/null -w '%{url_effective}' \
   https://github.com/agnogad/agno/releases/latest | sed 's|.*/tag/||')
-curl -L "https://github.com/agnogad/agno/releases/download/$tag/agno-${tag#v}-x86_64-unknown-linux-gnu.tar.gz" \
-  | tar -xz
-sudo install "agno-${tag#v}-x86_64-unknown-linux-gnu/agno" /usr/local/bin/
+name="agno-${tag#v}-x86_64-unknown-linux-gnu"
+base="https://github.com/agnogad/agno/releases/download/$tag"
+curl -fsSLO "$base/$name.tar.gz"
+curl -fsSLO "$base/$name.tar.gz.sha256"
+sha256sum -c "$name.tar.gz.sha256"
+tar -xzf "$name.tar.gz"
+sudo install "$name/agno" /usr/local/bin/
 ```
 
 The tag is resolved rather than written out because the version is part of
@@ -181,7 +185,7 @@ cargo install --path .
 
 ```sh
 agno --version
-# agno 0.3.7
+# agno 0.3.8
 ```
 
 ## Quick start

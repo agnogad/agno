@@ -1,3 +1,5 @@
+> **Historical review:** written at agno v0.3.2 / MSRV 1.85; the crate is now v0.3.8 / MSRV 1.88, so the version numbers in the header and findings below are snapshots from that time, not current state. Findings are left as written.
+
 # Rust review: agno (crate root, `src/**`, v0.3.2, edition 2024, MSRV 1.85)
 
 agno is a content-first static site generator: it walks `content/`, renders Markdown with

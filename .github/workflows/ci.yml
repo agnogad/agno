@@ -41,9 +41,21 @@ jobs:
 
       # --all-features turns on both regex engines, and syntect makes onig win
       # that tie, so the fancy path would otherwise never be compiled. The musl
-      # release ships it, so it has to build here.
+      # release ships it, so it has to build, lint and pass its tests here - not
+      # just on users' machines.
       - name: cargo check (pure-Rust regex engine)
         run: cargo check --all-targets --no-default-features --features fancy
+
+      - name: cargo clippy (pure-Rust regex engine)
+        run: cargo clippy --all-targets --no-default-features --features fancy -- -D warnings
+
+      - name: cargo test (pure-Rust regex engine)
+        run: cargo test --locked --no-default-features --features fancy
+
+      # Gate the published artifact: Cargo.toml's include list and the README's
+      # images have to survive `cargo package` before a tag can ship them.
+      - name: cargo package
+        run: cargo package --locked --allow-dirty
 
       - name: cargo doc
         run: cargo doc --no-deps --all-features

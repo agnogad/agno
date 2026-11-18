@@ -1,12 +1,11 @@
 [package]
 name = "agno"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 rust-version = "1.88"
 description = "A fast, content-first static site generator"
 license = "MIT"
 repository = "https://github.com/agnogad/agno"
-homepage = "https://github.com/agnogad/agno"
 readme = "README.md"
 keywords = ["static-site", "ssg", "markdown", "blog", "jinja"]
 categories = ["command-line-utilities", "web-programming"]
@@ -15,6 +14,7 @@ include = [
     "/theme/**",
     "/tests/**",
     "/assets/screenshot.png",
+    "/assets/banner/banner.gif",
     "/README.md",
     "/LICENSE",
 ]

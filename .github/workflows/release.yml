@@ -48,6 +48,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # An archive named after the tag must contain the binary built from that
+      # tag. workflow_dispatch has no tag, so it just takes the version from
+      # Cargo.toml and skips the comparison.
+      - name: check tag matches Cargo.toml version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$tag_version" != "$cargo_version" ]; then
+              echo "tag $GITHUB_REF_NAME ($tag_version) != Cargo.toml version ($cargo_version)" >&2
+              exit 1
+            fi
+          fi
+
       - name: apt packages
         if: matrix.packages
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
@@ -93,12 +109,30 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "dist/$env:NAME" -DestinationPath "dist/$env:NAME.zip"
 
+      # The checksum file holds `<hash>  <archive basename>` so a user can run
+      # `sha256sum -c <archive>.sha256` next to the downloaded archive.
+      - name: sha256 (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
+
+      - name: sha256 (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash "dist/$env:NAME.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $env:NAME.zip" | Set-Content -Path "dist/$env:NAME.zip.sha256" -Encoding ascii -NoNewline
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.sha256
           if-no-files-found: error
           retention-days: 7
 
