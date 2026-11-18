@@ -2,10 +2,13 @@
 //!
 //! A build is deterministic for a page when three things stay the same: the
 //! page source, the templates, and the site-wide context (`site.*`). The
-//! fingerprint file stores a hash of the first and a header hash of the other
-//! two, so a single edit only re-renders the page that changed. Rendered HTML
-//! is not duplicated here: the existing file in `dist/` is the cache, and it
-//! is reused only when its fingerprint still matches.
+//! fingerprint file stores each page's own key plus a header hash of the
+//! *stable* render environment (version, renderer revision, config, template
+//! sources and the non-volatile site identity), so a single edit only
+//! re-renders the page that changed. Content statistics are folded into a
+//! page's key only when its template reads them, and always into a list's.
+//! Rendered HTML is not duplicated here: the existing file in `dist/` is the
+//! cache, and it is reused only when its fingerprint still matches.
 
 use std::collections::HashMap;
 use std::fs;

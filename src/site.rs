@@ -350,6 +350,10 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let has_static_style = static_paths.iter().any(|path| path == "style.css");
 
     let templates = Templates::load(&cfg.templates())?;
+    let (template_sources, template_doubt) = template_sources(&cfg.templates())?;
+    let default_name = templates
+        .first(&["page.html"])
+        .context("no template for pages: page.html is missing")?;
     let index = PageIndex::new(&content.pages, &content.sections);
     // A page's neighbours are part of what it renders, so they join its cache
     // key: adding or reordering a page re-renders the two pages around it.
@@ -358,17 +362,31 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
         .iter()
         .map(|page| index.links(&page.url))
         .collect();
-    let page_keys: Vec<u64> = content
-        .pages
-        .iter()
-        .zip(&links)
-        .map(|(page, (prev, next))| page_key(page, *prev, *next))
-        .collect();
     let site = site_view(&cfg, &content, &index);
     // Serialize the site once: it is identical for every page, and rebuilding
     // it per page used to cost O(pages x tags) on taxonomy-heavy sites.
     let site_value: Value = Serde(&site).into();
+    // The cache header holds only the stable environment. Content statistics
+    // reach a page's key only when its template reads them.
     let header = header_hash(&cfg, &site)?;
+    let stats = stats_hash(&site)?;
+    let mut volatile_names: HashMap<String, bool> = HashMap::new();
+    let page_keys: Vec<u64> = content
+        .pages
+        .iter()
+        .zip(&links)
+        .map(|(page, (prev, next))| {
+            let name = page
+                .template
+                .as_deref()
+                .filter(|name| *name != default_name)
+                .unwrap_or(default_name.as_str());
+            let volatile = *volatile_names.entry(name.to_string()).or_insert_with(|| {
+                template_uses_volatile(name, &template_sources, template_doubt, &mut HashSet::new())
+            });
+            page_key(page, *prev, *next, volatile.then_some(stats))
+        })
+        .collect();
     let fingerprints = cache::Fingerprints::load(root, header);
     let output = cfg.output();
     if opts.clean && output.exists() {
@@ -382,7 +400,16 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let previous = if opts.clean {
         None
     } else {
-        read_manifest(root, &output)
+        match read_manifest(root, &output) {
+            Ok(previous) => previous,
+            Err(_) => {
+                // A corrupt or unreadable manifest cannot tell us which files
+                // are stale. Wipe the output tree so nothing without a source
+                // survives the rebuild; the fresh manifest is written below.
+                remove_all(&output).with_context(|| format!("cleaning {}", output.display()))?;
+                None
+            }
+        }
     };
     let mut expected = expected_outputs(&cfg, &content, &static_paths)?;
     if let Some(previous) = &previous {
@@ -391,9 +418,6 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
 
     // ---- pages ----
     let phase = Instant::now();
-    let default_name = templates
-        .first(&["page.html"])
-        .context("no template for pages: page.html is missing")?;
     let default_page = templates.get(&default_name)?;
     let fresh: Vec<Option<String>> = content
         .pages
@@ -471,7 +495,7 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Stats> {
     let list_keys: Vec<u64> = lists
         .iter()
         .zip(&list_names)
-        .map(|(list, name)| list_key(header, name, list, &card_keys))
+        .map(|(list, name)| list_key(header, stats, name, list, &card_keys))
         .collect();
     let list_rendered: Vec<bool> = lists
         .par_iter()
@@ -596,6 +620,14 @@ pub(crate) fn expected_outputs(
     expected.extend(static_paths.iter().cloned());
     for asset in &content.assets {
         expected.insert(output_rel(&asset.url));
+    }
+    // Validation folds output keys the same way; sanity-check the set here so
+    // a case-only collision can never reach the stale sweep or the manifest.
+    let mut folded = HashSet::with_capacity(expected.len());
+    for path in &expected {
+        if !folded.insert(output_key(path)) {
+            bail!("outputs {path} and another output collide on a case-insensitive filesystem");
+        }
     }
     Ok(expected)
 }
@@ -895,11 +927,15 @@ fn render_list(
 /// when one of their cards, their own metadata, or the site context changes.
 fn list_key(
     header: u64,
+    stats: u64,
     template: &str,
     list: &ListSpec<'_>,
     card_keys: &HashMap<&str, u64>,
 ) -> u64 {
     let mut hash = cache::fingerprint(header, template.as_bytes());
+    // Lists are always derived from the pages, so a content change that moves
+    // a count or a latest title must always re-render them.
+    hash = cache::fingerprint(hash, &stats.to_le_bytes());
     hash = cache::fingerprint(hash, list.url.as_bytes());
     hash = cache::fingerprint(hash, list.title.as_bytes());
     hash = cache::fingerprint(hash, list.description.as_bytes());
@@ -1057,6 +1093,12 @@ pub fn validate_outputs(cfg: &Config, content: &Content, static_paths: &[String]
     validate_urls(cfg, content, static_paths)
 }
 
+/// Case-fold an output path the way a case-insensitive static host matches
+/// URLs. Unicode-aware so `/Ä/` and `/ä/` are recognised as one output.
+fn output_key(path: &str) -> String {
+    path.to_lowercase()
+}
+
 #[derive(Default)]
 struct Outputs {
     files: HashMap<String, String>,
@@ -1069,8 +1111,9 @@ impl Outputs {
     }
 
     /// URL matching is case-insensitive, which is what a static host does.
+    /// ASCII-only folding let `/Ä/` and `/ä/` through as distinct outputs.
     fn add_key(&mut self, key: &str, display: &str, what: &str) -> Result<()> {
-        let key = key.to_ascii_lowercase();
+        let key = output_key(key);
         if let Some(existing) = self.files.insert(key.clone(), what.to_string()) {
             bail!("duplicate output URL {display}: {existing} and {what}");
         }
@@ -1163,11 +1206,35 @@ fn manifest_path(root: &Path, output: &Path) -> PathBuf {
 /// Everything a page render depends on except the page source itself.
 /// Bumped when a change alters rendered output without changing a template, a
 /// config value or the site context, so an existing cache does not keep pages
-/// from the previous renderer. 2: HTML escaping no longer escapes `/`.
-const RENDER_REVISION: u64 = 2;
+/// from the previous renderer. 2: HTML escaping no longer escapes `/`;
+/// 3: heading anchors and table-of-contents escaping.
+const RENDER_REVISION: u64 = 3;
 
+/// The cache header: everything a render depends on that is *stable* across
+/// content edits. Content statistics live in `stats_hash` and only reach the
+/// key of a template that actually reads them, so adding a post does not
+/// invalidate every page in the cache.
 fn header_hash(cfg: &Config, site: &SiteView<'_>) -> Result<u64> {
-    let site_json = serde_json::to_string(site).context("serializing site context")?;
+    #[derive(Serialize)]
+    struct Stable<'a> {
+        title: &'a str,
+        description: &'a str,
+        base_url: &'a str,
+        language: &'a str,
+        author: &'a str,
+        menu: &'a [MenuItem],
+        year: i32,
+    }
+    let stable = Stable {
+        title: &site.title,
+        description: &site.description,
+        base_url: &site.base_url,
+        language: &site.language,
+        author: &site.author,
+        menu: &site.menu,
+        year: site.year,
+    };
+    let site_json = serde_json::to_string(&stable).context("serializing site context")?;
     Ok(cache::combine(&[
         cache::fingerprint(0, env!("CARGO_PKG_VERSION").as_bytes()),
         cache::fingerprint(0, &RENDER_REVISION.to_le_bytes()),
@@ -1177,6 +1244,166 @@ fn header_hash(cfg: &Config, site: &SiteView<'_>) -> Result<u64> {
         cache::fingerprint(0, site_json.as_bytes()),
         templates_fingerprint(&cfg.templates())?,
     ]))
+}
+
+/// Hash of the `site.*` fields that move whenever content changes. Mixed into
+/// a page's key only when its template reads one of them; lists always carry
+/// it because their content is derived from the pages.
+fn stats_hash(site: &SiteView<'_>) -> Result<u64> {
+    #[derive(Serialize)]
+    struct Volatile<'a> {
+        post_count: usize,
+        tags: &'a [TagView<'a>],
+        categories: &'a [TagView<'a>],
+        sections: &'a [SectionView<'a>],
+    }
+    let volatile = Volatile {
+        post_count: site.post_count,
+        tags: &site.tags,
+        categories: &site.categories,
+        sections: &site.sections,
+    };
+    let json = serde_json::to_string(&volatile).context("serializing site statistics")?;
+    Ok(cache::fingerprint(0, json.as_bytes()))
+}
+
+/// `site.*` fields whose values change with content.
+const VOLATILE_SITE_FIELDS: [&str; 4] = ["post_count", "tags", "categories", "sections"];
+
+/// Source of every template that can take part in a render, keyed by the name
+/// `Templates` resolves. A file we cannot read as text sets `doubt`, which
+/// keeps the old "invalidate on every content change" behaviour.
+fn template_sources(dir: &Path) -> Result<(HashMap<String, String>, bool)> {
+    let mut sources: HashMap<String, String> = theme::TEMPLATES
+        .iter()
+        .map(|(name, source)| ((*name).to_string(), (*source).to_string()))
+        .collect();
+    let mut doubt = false;
+    if dir.is_dir() {
+        for entry in WalkDir::new(dir) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(dir)
+                .with_context(|| format!("reading template {}", entry.path().display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            match fs::read_to_string(entry.path()) {
+                Ok(source) => {
+                    sources.insert(rel, source);
+                }
+                Err(_) => doubt = true,
+            }
+        }
+    }
+    Ok((sources, doubt))
+}
+
+/// Whether resolving `name` can reach a volatile `site.*` field, following
+/// `extends`, `include`, `import` and `from`. An unresolvable or dynamic
+/// reference means doubt, so the page keeps being re-rendered as before.
+fn template_uses_volatile(
+    name: &str,
+    sources: &HashMap<String, String>,
+    doubt: bool,
+    seen: &mut HashSet<String>,
+) -> bool {
+    if doubt || !seen.insert(name.to_string()) {
+        return doubt;
+    }
+    let Some(source) = sources.get(name) else {
+        return true;
+    };
+    let compact = compact_template(source);
+    if VOLATILE_SITE_FIELDS.iter().any(|field| {
+        compact.contains(&format!("site.{field}"))
+            || compact.contains(&format!("site['{field}']"))
+            || compact.contains(&format!("site[\"{field}\"]"))
+    }) || bare_site(&compact)
+        || ["site.get(", "site.items(", "site.keys(", "site.values("]
+            .iter()
+            .any(|pattern| compact.contains(pattern))
+    {
+        return true;
+    }
+    match referenced_templates(source) {
+        Some(refs) => refs
+            .iter()
+            .any(|child| template_uses_volatile(child, sources, doubt, seen)),
+        None => true,
+    }
+}
+
+/// Drop whitespace next to template punctuation so `site . tags` and
+/// `site[ 'tags' ]` look like `site.tags` / `site['tags']`, while keeping the
+/// space in `in site.menu` that distinguishes it from bare `site`.
+fn compact_template(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let punct = |ch: char| {
+        matches!(
+            ch,
+            '.' | '[' | ']' | '\'' | '"' | '(' | ')' | ',' | '|' | '%' | '{' | '}'
+        )
+    };
+    let mut out = String::with_capacity(source.len());
+    for (index, ch) in chars.iter().enumerate() {
+        let beside_punct = (index > 0 && punct(chars[index - 1]))
+            || (index + 1 < chars.len() && punct(chars[index + 1]));
+        if ch.is_whitespace() && beside_punct {
+            continue;
+        }
+        out.push(*ch);
+    }
+    out
+}
+
+/// A `site` followed by a value terminator (`}}`, `%}`, a filter, an argument
+/// list, …) is iterated, aliased or passed around, so it may reach a volatile
+/// field we do not track. `site-header` and `site_name` are plain text.
+fn bare_site(compact: &str) -> bool {
+    let bytes = compact.as_bytes();
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-';
+    let mut start = 0;
+    while let Some(relative) = compact[start..].find("site") {
+        let index = start + relative;
+        let before = index.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+        let after = bytes.get(index + 4).copied();
+        if before.is_none_or(|byte| !word(byte) && byte != b'.')
+            && after.is_none_or(|byte| matches!(byte, b'}' | b'%' | b'|' | b')' | b',' | b']'))
+        {
+            return true;
+        }
+        start = index + 4;
+    }
+    false
+}
+
+/// Names of templates a tag pulls in, or `None` for a dynamic reference.
+fn referenced_templates(source: &str) -> Option<Vec<String>> {
+    let mut refs = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("{%") {
+        let tail = &rest[start + 2..];
+        let end = tail.find("%}")?;
+        let body = tail[..end].trim();
+        rest = &tail[end + 2..];
+        let keyword = body.split_whitespace().next().unwrap_or_default();
+        if !matches!(keyword, "extends" | "include" | "import" | "from") {
+            continue;
+        }
+        let argument = body[keyword.len()..].trim_start();
+        let quote = argument
+            .chars()
+            .next()
+            .filter(|ch| *ch == '\'' || *ch == '"')?;
+        let after = &argument[quote.len_utf8()..];
+        let end_quote = after.find(quote)?;
+        refs.push(after[..end_quote].to_string());
+    }
+    Some(refs)
 }
 
 fn templates_fingerprint(dir: &Path) -> Result<u64> {
@@ -1206,9 +1433,19 @@ fn templates_fingerprint(dir: &Path) -> Result<u64> {
     Ok(hash)
 }
 
-fn read_manifest(root: &Path, output: &Path) -> Option<Manifest> {
-    let src = fs::read_to_string(manifest_path(root, output)).ok()?;
-    serde_json::from_str(&src).ok()
+/// Read the build manifest. A missing manifest is normal; a corrupt or
+/// unreadable one is an error, so the caller can force a clean rebuild instead
+/// of silently skipping the stale sweep.
+fn read_manifest(root: &Path, output: &Path) -> Result<Option<Manifest>> {
+    let path = manifest_path(root, output);
+    let src = match fs::read_to_string(&path) {
+        Ok(src) => src,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+    };
+    let manifest = serde_json::from_str(&src)
+        .with_context(|| format!("parsing manifest {}", path.display()))?;
+    Ok(Some(manifest))
 }
 
 fn write_manifest(
@@ -1234,13 +1471,21 @@ fn write_manifest(
         files,
     };
     let body = serde_json::to_string(&manifest).context("serializing build manifest")?;
-    fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
+    // Replace in one rename: a crash mid-write must not leave a half-written
+    // manifest that the next build would treat as corrupt.
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
 }
 
 fn remove_stale(output: &Path, manifest: &Manifest, expected: &HashSet<String>) -> Result<()> {
     if manifest.output != output.to_string_lossy() {
         return Ok(());
     }
+    // Match exact paths only. On a case-insensitive host the old-cased file is
+    // the same inode as the new output, so deleting it here is harmless — it is
+    // rewritten below. Folding here would instead keep the old-cased file alive
+    // on a case-sensitive host after a case-only rename, leaving it stale.
     for rel in &manifest.files {
         if expected.contains(rel)
             || rel.is_empty()
@@ -1385,7 +1630,9 @@ fn neighbor(page: Option<&Page>) -> Option<NeighborView<'_>> {
 /// Cache key of a rendered page: its source fingerprint plus every field the
 /// navigation exposes about the two pages it points at. A neighbour that is
 /// added, removed, renamed or re-dated therefore re-renders this page.
-fn page_key(page: &Page, prev: Option<&Page>, next: Option<&Page>) -> u64 {
+/// `volatile` carries the site statistics hash only for templates that read
+/// them, so a post added elsewhere leaves unrelated pages cached.
+fn page_key(page: &Page, prev: Option<&Page>, next: Option<&Page>, volatile: Option<u64>) -> u64 {
     let mut hash = page.content_key;
     for neighbor in [prev, next] {
         let (url, title, date_display) = neighbor.map_or(("", "", ""), |page| {
@@ -1398,6 +1645,9 @@ fn page_key(page: &Page, prev: Option<&Page>, next: Option<&Page>) -> u64 {
         hash = cache::fingerprint(hash, url.as_bytes());
         hash = cache::fingerprint(hash, title.as_bytes());
         hash = cache::fingerprint(hash, date_display.as_bytes());
+    }
+    if let Some(stats) = volatile {
+        hash = cache::fingerprint(hash, &stats.to_le_bytes());
     }
     hash
 }
