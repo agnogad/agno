@@ -104,14 +104,7 @@ fn main() -> Result<()> {
             root,
         } => {
             let root = root.unwrap_or_else(|| PathBuf::from("."));
-            let report = site::build(
-                &root,
-                &BuildOptions {
-                    drafts,
-                    clean,
-                    minify,
-                },
-            )?;
+            let report = site::build(&root, &build_options(drafts, clean, minify))?;
             if stats {
                 println!(
                     "  content {} ms · pages {} ms · lists+feeds {} ms",
@@ -157,4 +150,194 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Map the parsed build flags to the options `site::build` consumes. Kept
+/// separate from `main` so the flag-to-option wiring can be tested without
+/// running a real build.
+fn build_options(drafts: bool, clean: bool, minify: bool) -> BuildOptions {
+    BuildOptions {
+        drafts,
+        clean,
+        minify,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args.iter().copied()).expect("valid CLI input")
+    }
+
+    fn parse_err(args: &[&str]) -> clap::error::Error {
+        match Cli::try_parse_from(args.iter().copied()) {
+            Ok(_) => panic!("expected parse error for {args:?}"),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn build_flags_reach_build_options() {
+        let cli = parse(&[
+            "agno", "build", "--drafts", "--minify", "--clean", "--root", "site",
+        ]);
+        let Command::Build {
+            drafts,
+            stats,
+            clean,
+            minify,
+            no_clean,
+            root,
+        } = cli.command
+        else {
+            panic!("expected build command");
+        };
+        assert!(drafts);
+        assert!(clean);
+        assert!(minify);
+        assert!(!stats);
+        assert!(!no_clean);
+        assert_eq!(root, Some(PathBuf::from("site")));
+
+        let opts = build_options(drafts, clean, minify);
+        assert!(opts.drafts);
+        assert!(opts.clean);
+        assert!(opts.minify);
+    }
+
+    #[test]
+    fn build_defaults_are_off() {
+        let cli = parse(&["agno", "build"]);
+        let Command::Build {
+            drafts,
+            stats,
+            clean,
+            minify,
+            no_clean,
+            root,
+        } = cli.command
+        else {
+            panic!("expected build command");
+        };
+        assert!(!drafts && !clean && !minify && !stats && !no_clean);
+        assert_eq!(root, None);
+
+        let opts = build_options(drafts, clean, minify);
+        assert!(!opts.drafts && !opts.clean && !opts.minify);
+    }
+
+    #[test]
+    fn no_clean_is_accepted_and_ignored() {
+        let cli = parse(&["agno", "build", "--no-clean"]);
+        let Command::Build {
+            clean, no_clean, ..
+        } = cli.command
+        else {
+            panic!("expected build command");
+        };
+        assert!(no_clean);
+        assert!(!clean);
+    }
+
+    #[test]
+    fn build_root_accepts_long_and_short_forms() {
+        let cli = parse(&["agno", "build", "--root", "site"]);
+        let Command::Build { root, .. } = cli.command else {
+            panic!("expected build command");
+        };
+        assert_eq!(root, Some(PathBuf::from("site")));
+
+        let cli = parse(&["agno", "build", "-r", "../docs"]);
+        let Command::Build { root, .. } = cli.command else {
+            panic!("expected build command");
+        };
+        assert_eq!(root, Some(PathBuf::from("../docs")));
+    }
+
+    #[test]
+    fn dev_parses_port_drafts_and_root() {
+        let cli = parse(&[
+            "agno", "dev", "--port", "2222", "--drafts", "--root", "docs",
+        ]);
+        let Command::Dev { port, drafts, root } = cli.command else {
+            panic!("expected dev command");
+        };
+        assert_eq!(port, 2222);
+        assert!(drafts);
+        assert_eq!(root, Some(PathBuf::from("docs")));
+    }
+
+    #[test]
+    fn dev_defaults_and_short_port() {
+        let cli = parse(&["agno", "dev"]);
+        let Command::Dev { port, drafts, root } = cli.command else {
+            panic!("expected dev command");
+        };
+        assert_eq!(port, 1111);
+        assert!(!drafts);
+        assert_eq!(root, None);
+
+        let cli = parse(&["agno", "dev", "-p", "8080"]);
+        let Command::Dev { port, .. } = cli.command else {
+            panic!("expected dev command");
+        };
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn other_subcommands_parse() {
+        let cli = parse(&["agno", "new", "site", "--force"]);
+        let Command::New { path, force } = cli.command else {
+            panic!("expected new command");
+        };
+        assert_eq!(path, PathBuf::from("site"));
+        assert!(force);
+
+        let cli = parse(&["agno", "clean", "-r", "site"]);
+        let Command::Clean { root } = cli.command else {
+            panic!("expected clean command");
+        };
+        assert_eq!(root, Some(PathBuf::from("site")));
+
+        let cli = parse(&["agno", "check", "--drafts", "--root", "site"]);
+        let Command::Check { drafts, root } = cli.command else {
+            panic!("expected check command");
+        };
+        assert!(drafts);
+        assert_eq!(root, Some(PathBuf::from("site")));
+    }
+
+    #[test]
+    fn help_and_no_args_are_reported() {
+        let err = parse_err(&["agno", "--help"]);
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+        assert!(err.to_string().contains("Usage:"));
+
+        let err = parse_err(&["agno", "build", "--help"]);
+        assert_eq!(err.kind(), ErrorKind::DisplayHelp);
+
+        let err = parse_err(&["agno"]);
+        assert_eq!(
+            err.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+    }
+
+    #[test]
+    fn invalid_args_produce_an_error() {
+        let err = parse_err(&["agno", "build", "--bogus"]);
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+
+        let err = parse_err(&["agno", "dev", "--port", "not-a-number"]);
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+
+        let err = parse_err(&["agno", "build", "--root"]);
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+
+        let err = parse_err(&["agno", "bogus-subcommand"]);
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
 }
